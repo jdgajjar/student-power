@@ -8,29 +8,47 @@ import { slugify } from '@/lib/utils/slugify';
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-// GET all courses or courses by universityId
+/**
+ * GET /api/courses
+ *
+ * Query parameters
+ * ─────────────────────────────────────────────────────────
+ * universityId – (optional) filter courses for a specific university
+ * search       – (optional) case-insensitive search on name, code, description
+ */
 export async function GET(request: NextRequest) {
   try {
     await connectDB();
-    
+
     const { searchParams } = new URL(request.url);
     const universityId = searchParams.get('universityId');
-    
-    const query = universityId ? { universityId } : {};
+    const search = searchParams.get('search');
+
+    const query: Record<string, any> = {};
+    if (universityId) query.universityId = universityId;
+    if (search && search.trim() !== '') {
+      const searchRegex = new RegExp(search.trim(), 'i');
+      query.$or = [
+        { name: searchRegex },
+        { code: searchRegex },
+        { description: searchRegex },
+      ];
+    }
+
     const courses = await Course.find(query)
       .select('-__v')
       .sort({ createdAt: -1 })
       .lean();
-    
+
     return NextResponse.json(
       { success: true, data: courses },
-      { 
+      {
         status: 200,
         headers: {
           'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
-          'Pragma': 'no-cache',
-          'Expires': '0',
-        }
+          Pragma: 'no-cache',
+          Expires: '0',
+        },
       }
     );
   } catch (error: any) {
@@ -47,7 +65,7 @@ function calculateSemesters(duration: string): number {
   // Extract number from duration string (e.g., "4 years", "3 year", "2.5 years")
   const match = duration.match(/(\d+\.?\d*)/);
   if (!match) return 0;
-  
+
   const years = parseFloat(match[1]);
   // 1 year = 2 semesters
   return Math.floor(years * 2);
@@ -57,23 +75,23 @@ function calculateSemesters(duration: string): number {
 export async function POST(request: NextRequest) {
   try {
     await connectDB();
-    
+
     const body = await request.json();
-    
+
     // Generate slug from name
     const slug = slugify(body.name);
-    
+
     // Create the course
     const course = await Course.create({
       ...body,
       slug,
     });
-    
+
     // Automatically generate semesters based on duration
     let semestersCreated = 0;
     if (course.duration) {
       const totalSemesters = calculateSemesters(course.duration);
-      
+
       if (totalSemesters > 0) {
         // Create semesters
         const semesterPromises = [];
@@ -84,22 +102,25 @@ export async function POST(request: NextRequest) {
               courseId: course._id,
               number: i,
               name: `Semester ${i}`,
-              slug: semesterSlug
+              slug: semesterSlug,
             })
           );
         }
-        
+
         // Wait for all semesters to be created
         await Promise.all(semesterPromises);
         semestersCreated = totalSemesters;
       }
     }
-    
-    return NextResponse.json({ 
-      success: true, 
-      data: course,
-      message: `Course created successfully with ${semestersCreated} semesters`
-    }, { status: 201 });
+
+    return NextResponse.json(
+      {
+        success: true,
+        data: course,
+        message: `Course created successfully with ${semestersCreated} semesters`,
+      },
+      { status: 201 }
+    );
   } catch (error: any) {
     console.error('Error creating course:', error);
     return NextResponse.json(

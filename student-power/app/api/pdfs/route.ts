@@ -15,6 +15,8 @@ const DEFAULT_PAGE_SIZE = 10;
  * Query parameters
  * ─────────────────────────────────────────────────────────
  * subjectId  – (optional) filter PDFs belonging to a specific subject
+ * category   – (optional) filter by category (notes | assignments | papers | other)
+ * search     – (optional) full-text search on title and description (case-insensitive)
  * page       – (optional) 1-based page number; enables pagination
  * limit      – (optional) results per page (default: 10, max: 100)
  * paginate   – (optional) set to "true" to force paginated response even for page 1
@@ -34,6 +36,8 @@ export async function GET(request: NextRequest) {
 
     // ── Filter params ──────────────────────────────────
     const subjectId = searchParams.get('subjectId');
+    const category = searchParams.get('category');
+    const search = searchParams.get('search');
 
     // ── Pagination params ──────────────────────────────
     const pageParam = searchParams.get('page');
@@ -46,7 +50,15 @@ export async function GET(request: NextRequest) {
     // • subjectId only       → legacy flat response (public subject pages)
     const shouldPaginate = pageParam !== null || paginateParam === 'true';
 
-    const query = subjectId ? { subjectId } : {};
+    // ── Build MongoDB query ────────────────────────────
+    const query: Record<string, any> = {};
+
+    if (subjectId) query.subjectId = subjectId;
+    if (category && category !== 'all') query.category = category;
+    if (search && search.trim() !== '') {
+      const searchRegex = new RegExp(search.trim(), 'i');
+      query.$or = [{ title: searchRegex }, { description: searchRegex }];
+    }
 
     if (shouldPaginate) {
       // ── Paginated path ─────────────────────────────────

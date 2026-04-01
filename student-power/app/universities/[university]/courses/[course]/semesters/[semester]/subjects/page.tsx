@@ -1,13 +1,12 @@
 'use client';
 
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import { useStore } from '@/lib/store';
-import SearchBar from '@/components/ui/SearchBar';
 import Card from '@/components/ui/Card';
 import Button from '@/components/ui/Button';
 import Breadcrumbs from '@/components/ui/Breadcrumbs';
-import { BookOpen, Award, ArrowLeft, Plus } from 'lucide-react';
+import { BookOpen, Award, Plus, Search } from 'lucide-react';
 
 interface University {
   _id: string;
@@ -36,6 +35,8 @@ interface Subject {
   semesterId: string;
 }
 
+const DEBOUNCE_MS = 350;
+
 export default function SubjectsPage() {
   const router = useRouter();
   const params = useParams();
@@ -43,64 +44,102 @@ export default function SubjectsPage() {
   const courseSlug = params.course as string;
   const semesterSlug = params.semester as string;
   const { isAdmin } = useStore();
+
+  const [searchInput, setSearchInput] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
+
   const [university, setUniversity] = useState<University | null>(null);
   const [course, setCourse] = useState<Course | null>(null);
   const [semester, setSemester] = useState<Semester | null>(null);
+  const [courseId, setCourseId] = useState<string>('');
+  const [semesterId, setSemesterId] = useState<string>('');
+
   const [subjects, setSubjects] = useState<Subject[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [contextLoading, setContextLoading] = useState(true);
+  const [subjectsLoading, setSubjectsLoading] = useState(false);
 
+  const debounceTimer = useRef<NodeJS.Timeout | null>(null);
+
+  // Cleanup debounce on unmount
   useEffect(() => {
-    const fetchData = async () => {
-      try {
-        setLoading(true);
-        // Fetch university details
-        const uniResponse = await fetch(`/api/universities/${universitySlug}`);
-        const uniData = await uniResponse.json();
-        if (uniData.success) {
-          setUniversity(uniData.data);
-        }
+    return () => {
+      if (debounceTimer.current) clearTimeout(debounceTimer.current);
+    };
+  }, []);
 
-        // Fetch course details
-        const courseResponse = await fetch(`/api/courses/${courseSlug}`);
-        const courseData = await courseResponse.json();
+  // Debounced search handler
+  const handleSearchInput = (value: string) => {
+    setSearchInput(value);
+    if (debounceTimer.current) clearTimeout(debounceTimer.current);
+    debounceTimer.current = setTimeout(() => {
+      setSearchQuery(value);
+    }, DEBOUNCE_MS);
+  };
+
+  // Load university, course, semester context
+  useEffect(() => {
+    const loadContext = async () => {
+      try {
+        setContextLoading(true);
+
+        const [uniRes, courseRes, semRes] = await Promise.all([
+          fetch(`/api/universities/${universitySlug}`, { cache: 'no-store' }),
+          fetch(`/api/courses/${courseSlug}`, { cache: 'no-store' }),
+          fetch(`/api/semesters/${semesterSlug}`, { cache: 'no-store' }),
+        ]);
+
+        const [uniData, courseData, semData] = await Promise.all([
+          uniRes.json(),
+          courseRes.json(),
+          semRes.json(),
+        ]);
+
+        if (uniData.success) setUniversity(uniData.data);
         if (courseData.success) {
           setCourse(courseData.data);
+          setCourseId(courseData.data._id);
         }
-
-        // Fetch semester details
-        const semesterResponse = await fetch(`/api/semesters/${semesterSlug}`);
-        const semesterData = await semesterResponse.json();
-        if (semesterData.success) {
-          setSemester(semesterData.data);
-        }
-        
-        // Fetch subjects for this course and semester
-        if (courseData.data && semesterData.data) {
-          const subjectsResponse = await fetch(`/api/subjects?courseId=${courseData.data._id}&semesterId=${semesterData.data._id}`);
-          const subjectsData = await subjectsResponse.json();
-          if (subjectsData.success) {
-            setSubjects(subjectsData.data);
-          }
+        if (semData.success) {
+          setSemester(semData.data);
+          setSemesterId(semData.data._id);
         }
       } catch (error) {
-        console.error('Error fetching data:', error);
+        console.error('Error loading context:', error);
       } finally {
-        setLoading(false);
+        setContextLoading(false);
       }
     };
 
-    fetchData();
+    loadContext();
   }, [universitySlug, courseSlug, semesterSlug]);
 
-  const filteredSubjects = useMemo(() => {
-    return subjects.filter(subject =>
-      subject.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      subject.code.toLowerCase().includes(searchQuery.toLowerCase())
-    );
-  }, [subjects, searchQuery]);
+  // Fetch subjects with server-side search and filtering
+  useEffect(() => {
+    if (!courseId || !semesterId) return;
 
-  if (loading) {
+    const fetchSubjects = async () => {
+      try {
+        setSubjectsLoading(true);
+        const queryParams = new URLSearchParams({ courseId, semesterId });
+        if (searchQuery.trim() !== '') queryParams.set('search', searchQuery.trim());
+
+        const res = await fetch(`/api/subjects?${queryParams.toString()}`, {
+          cache: 'no-store',
+          headers: { 'Cache-Control': 'no-cache' },
+        });
+        const data = await res.json();
+        if (data.success) setSubjects(data.data);
+      } catch (error) {
+        console.error('Error fetching subjects:', error);
+      } finally {
+        setSubjectsLoading(false);
+      }
+    };
+
+    fetchSubjects();
+  }, [courseId, semesterId, searchQuery]);
+
+  if (contextLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
         <p className="text-gray-600 dark:text-gray-400 text-lg">Loading...</p>
@@ -124,10 +163,10 @@ export default function SubjectsPage() {
   // Generate breadcrumb items
   const breadcrumbItems = [
     { name: 'Universities', href: '/universities' },
-    { name: university?.name || '', href: `/universities/${universitySlug}/courses` },
-    { name: course?.name || '', href: `/universities/${universitySlug}/courses/${courseSlug}/semesters` },
-    { name: semester?.name || '', href: `/universities/${universitySlug}/courses/${courseSlug}/semesters/${semesterSlug}/subjects` },
-  ].filter(item => item.name);
+    { name: university.name, href: `/universities/${universitySlug}/courses` },
+    { name: course.name, href: `/universities/${universitySlug}/courses/${courseSlug}/semesters` },
+    { name: semester.name, href: `/universities/${universitySlug}/courses/${courseSlug}/semesters/${semesterSlug}/subjects` },
+  ].filter((item) => item.name);
 
   return (
     <div className="min-h-screen py-8 px-4 sm:px-6 lg:px-8">
@@ -145,11 +184,21 @@ export default function SubjectsPage() {
           </p>
 
           <div className="flex flex-col sm:flex-row gap-4 items-start sm:items-center justify-between">
-            <SearchBar
-              placeholder="Search subjects..."
-              onSearch={setSearchQuery}
-              className="w-full sm:max-w-md"
-            />
+            {/* Debounced search bar */}
+            <div className="relative w-full sm:max-w-md">
+              <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                <Search className="h-5 w-5 text-gray-400" />
+              </div>
+              <input
+                type="text"
+                placeholder="Search subjects..."
+                value={searchInput}
+                onChange={(e) => handleSearchInput(e.target.value)}
+                className="block w-full pl-10 pr-3 py-3 border border-gray-300 dark:border-gray-600 rounded-lg leading-5
+                           bg-white dark:bg-gray-800 placeholder-gray-500
+                           focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
+              />
+            </div>
             {isAdmin && (
               <Button
                 onClick={() => router.push('/admin/subjects')}
@@ -163,13 +212,27 @@ export default function SubjectsPage() {
         </div>
 
         {/* Subjects Grid */}
-        {filteredSubjects.length === 0 ? (
+        {subjectsLoading ? (
+          <div className="text-center py-12">
+            <p className="text-gray-600 dark:text-gray-400 text-lg">Loading subjects...</p>
+          </div>
+        ) : subjects.length === 0 ? (
           <div className="text-center py-12">
             <BookOpen className="h-16 w-16 text-gray-400 mx-auto mb-4" />
             <p className="text-gray-600 dark:text-gray-400 text-lg">
-              {subjects.length === 0 ? 'No subjects found for this semester. Please add one from the admin panel.' : 'No subjects found matching your search'}
+              {searchQuery !== ''
+                ? 'No subjects match your search.'
+                : 'No subjects found for this semester. Please add one from the admin panel.'}
             </p>
-            {isAdmin && subjects.length === 0 && (
+            {searchQuery !== '' && (
+              <button
+                onClick={() => { setSearchInput(''); setSearchQuery(''); }}
+                className="mt-3 text-sm text-blue-600 dark:text-blue-400 hover:underline"
+              >
+                Clear search
+              </button>
+            )}
+            {isAdmin && searchQuery === '' && (
               <Button onClick={() => router.push('/admin/subjects')} className="mt-4">
                 Add First Subject
               </Button>
@@ -177,10 +240,14 @@ export default function SubjectsPage() {
           </div>
         ) : (
           <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {filteredSubjects.map((subject) => (
+            {subjects.map((subject) => (
               <Card
                 key={subject._id}
-                onClick={() => router.push(`/universities/${universitySlug}/courses/${courseSlug}/semesters/${semesterSlug}/subjects/${subject.slug}/pdfs`)}
+                onClick={() =>
+                  router.push(
+                    `/universities/${universitySlug}/courses/${courseSlug}/semesters/${semesterSlug}/subjects/${subject.slug}/pdfs`
+                  )
+                }
               >
                 <div className="flex flex-col h-full">
                   <div className="flex items-start justify-between mb-2">

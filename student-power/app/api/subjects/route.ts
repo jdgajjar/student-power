@@ -7,33 +7,50 @@ import { slugify } from '@/lib/utils/slugify';
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-// GET all subjects or subjects by courseId and/or semesterId
+/**
+ * GET /api/subjects
+ *
+ * Query parameters
+ * ─────────────────────────────────────────────────────────
+ * courseId    – (optional) filter subjects for a specific course
+ * semesterId  – (optional) filter subjects for a specific semester
+ * search      – (optional) case-insensitive search on name, code, description
+ */
 export async function GET(request: NextRequest) {
   try {
     await connectDB();
-    
+
     const { searchParams } = new URL(request.url);
     const courseId = searchParams.get('courseId');
     const semesterId = searchParams.get('semesterId');
-    
-    const query: any = {};
+    const search = searchParams.get('search');
+
+    const query: Record<string, any> = {};
     if (courseId) query.courseId = courseId;
     if (semesterId) query.semesterId = semesterId;
-    
+    if (search && search.trim() !== '') {
+      const searchRegex = new RegExp(search.trim(), 'i');
+      query.$or = [
+        { name: searchRegex },
+        { code: searchRegex },
+        { description: searchRegex },
+      ];
+    }
+
     const subjects = await Subject.find(query)
       .select('-__v')
       .sort({ createdAt: -1 })
       .lean();
-    
+
     return NextResponse.json(
       { success: true, data: subjects },
-      { 
+      {
         status: 200,
         headers: {
           'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
-          'Pragma': 'no-cache',
-          'Expires': '0',
-        }
+          Pragma: 'no-cache',
+          Expires: '0',
+        },
       }
     );
   } catch (error: any) {
@@ -49,23 +66,23 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     await connectDB();
-    
+
     const body = await request.json();
-    
+
     // Generate slug from name
     const slug = slugify(body.name);
-    
+
     // Create subject
     const subject = await Subject.create({
       ...body,
       slug,
     });
-    
+
     return NextResponse.json(
-      { 
-        success: true, 
+      {
+        success: true,
         data: subject,
-        message: 'Subject created successfully'
+        message: 'Subject created successfully',
       },
       { status: 201 }
     );
