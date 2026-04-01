@@ -16,6 +16,10 @@ import {
   ChevronLeft,
   ChevronRight,
   Search,
+  Files,
+  CheckCircle2,
+  AlertCircle,
+  Loader2,
 } from 'lucide-react';
 
 // ──────────────────────────────────────────────
@@ -72,6 +76,13 @@ interface University {
   slug: string;
 }
 
+/** Result of a single file in a bulk upload */
+interface BulkFileResult {
+  fileName: string;
+  success: boolean;
+  error?: string;
+}
+
 // ──────────────────────────────────────────────
 // Constants
 // ──────────────────────────────────────────────
@@ -88,6 +99,176 @@ const emptyFormData: PDF = {
   category: 'other',
 };
 
+const CATEGORY_OPTIONS = [
+  { value: 'notes',       label: 'Notes' },
+  { value: 'assignments', label: 'Assignments' },
+  { value: 'papers',      label: 'Papers' },
+  { value: 'other',       label: 'Other' },
+] as const;
+
+// ──────────────────────────────────────────────
+// SearchableSubjectDropdown
+// ──────────────────────────────────────────────
+
+interface SearchableSubjectDropdownProps {
+  subjects: Subject[];
+  value: string;
+  onChange: (value: string) => void;
+  placeholder?: string;
+  required?: boolean;
+  id?: string;
+}
+
+function SearchableSubjectDropdown({
+  subjects,
+  value,
+  onChange,
+  placeholder = 'Select Subject',
+  required = false,
+  id,
+}: SearchableSubjectDropdownProps) {
+  const [open,         setOpen]        = useState(false);
+  const [searchTerm,   setSearchTerm]  = useState('');
+  const containerRef                   = useRef<HTMLDivElement>(null);
+  const searchRef                      = useRef<HTMLInputElement>(null);
+
+  const selectedSubject = subjects.find((s) => s._id === value);
+
+  const filtered = searchTerm.trim()
+    ? subjects.filter(
+        (s) =>
+          s.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+          s.code.toLowerCase().includes(searchTerm.toLowerCase())
+      )
+    : subjects;
+
+  // Close on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setOpen(false);
+        setSearchTerm('');
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  // Focus search input when dropdown opens
+  useEffect(() => {
+    if (open) {
+      setTimeout(() => searchRef.current?.focus(), 50);
+    }
+  }, [open]);
+
+  const handleSelect = (subjectId: string) => {
+    onChange(subjectId);
+    setOpen(false);
+    setSearchTerm('');
+  };
+
+  return (
+    <div ref={containerRef} className="relative" id={id}>
+      {/* Hidden native select for form validation */}
+      {required && (
+        <select
+          required={required}
+          value={value}
+          onChange={() => {}}
+          aria-hidden="true"
+          tabIndex={-1}
+          className="absolute opacity-0 pointer-events-none w-0 h-0"
+        >
+          <option value="" />
+          {subjects.map((s) => (
+            <option key={s._id} value={s._id} />
+          ))}
+        </select>
+      )}
+
+      {/* Trigger button */}
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className={`w-full flex items-center justify-between px-4 py-2 border rounded-lg text-left
+                    transition-colors text-sm
+                    ${
+                      open
+                        ? 'border-blue-500 ring-2 ring-blue-500/30 bg-white dark:bg-gray-700'
+                        : 'border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 hover:border-gray-400 dark:hover:border-gray-500'
+                    }
+                    text-gray-900 dark:text-white`}
+      >
+        <span className={selectedSubject ? '' : 'text-gray-500 dark:text-gray-400'}>
+          {selectedSubject
+            ? `${selectedSubject.code} - ${selectedSubject.name}`
+            : placeholder}
+        </span>
+        <svg
+          className={`h-4 w-4 text-gray-400 flex-shrink-0 transition-transform ${open ? 'rotate-180' : ''}`}
+          fill="none"
+          stroke="currentColor"
+          viewBox="0 0 24 24"
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+
+      {/* Dropdown panel */}
+      {open && (
+        <div className="absolute z-50 mt-1 w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-600
+                        rounded-lg shadow-lg overflow-hidden">
+          {/* Search box */}
+          <div className="p-2 border-b border-gray-100 dark:border-gray-700">
+            <div className="relative">
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-400 pointer-events-none" />
+              <input
+                ref={searchRef}
+                type="text"
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                placeholder="Search subjects..."
+                className="w-full pl-7 pr-3 py-1.5 text-sm bg-gray-50 dark:bg-gray-700 border border-gray-200
+                           dark:border-gray-600 rounded-md text-gray-900 dark:text-white
+                           placeholder:text-gray-400 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              />
+            </div>
+          </div>
+
+          {/* Options list */}
+          <ul className="max-h-48 overflow-y-auto">
+            {filtered.length === 0 ? (
+              <li className="px-4 py-3 text-sm text-gray-500 dark:text-gray-400 text-center">
+                No subjects found
+              </li>
+            ) : (
+              filtered.map((s) => (
+                <li key={s._id}>
+                  <button
+                    type="button"
+                    onClick={() => handleSelect(s._id)}
+                    className={`w-full text-left px-4 py-2.5 text-sm transition-colors
+                                ${
+                                  s._id === value
+                                    ? 'bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 font-medium'
+                                    : 'text-gray-900 dark:text-gray-100 hover:bg-gray-50 dark:hover:bg-gray-700'
+                                }`}
+                  >
+                    <span className="font-mono text-xs text-gray-500 dark:text-gray-400 mr-2">
+                      {s.code}
+                    </span>
+                    {s.name}
+                  </button>
+                </li>
+              ))
+            )}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ──────────────────────────────────────────────
 // Pagination component
 // ──────────────────────────────────────────────
@@ -102,11 +283,6 @@ function Pagination({ pagination, onPageChange }: PaginationProps) {
 
   if (totalPages <= 1) return null;
 
-  /**
-   * Build a compact page-number list.
-   * Always shows: page 1, current page ± 1, last page.
-   * Inserts '…' wherever there is a gap larger than 1.
-   */
   const buildPageNumbers = (): (number | '...')[] => {
     const pageSet = new Set<number>();
     pageSet.add(1);
@@ -129,20 +305,17 @@ function Pagination({ pagination, onPageChange }: PaginationProps) {
   };
 
   const pageNumbers = buildPageNumbers();
-  const startItem = (page - 1) * limit + 1;
-  const endItem   = Math.min(page * limit, total);
+  const startItem   = (page - 1) * limit + 1;
+  const endItem     = Math.min(page * limit, total);
 
   return (
     <div className="mt-8 flex flex-col items-center gap-4">
-      {/* Result count info */}
       <p className="text-sm text-gray-600 dark:text-gray-400">
         Showing <span className="font-semibold">{startItem}–{endItem}</span> of{' '}
         <span className="font-semibold">{total}</span> PDFs
       </p>
 
-      {/* Navigation row */}
       <div className="flex items-center gap-1 flex-wrap justify-center">
-        {/* Previous */}
         <button
           onClick={() => onPageChange(page - 1)}
           disabled={!hasPrevPage}
@@ -156,7 +329,6 @@ function Pagination({ pagination, onPageChange }: PaginationProps) {
           <span className="hidden sm:inline">Previous</span>
         </button>
 
-        {/* Page numbers */}
         {pageNumbers.map((p, idx) =>
           p === '...' ? (
             <span
@@ -183,7 +355,6 @@ function Pagination({ pagination, onPageChange }: PaginationProps) {
           )
         )}
 
-        {/* Next */}
         <button
           onClick={() => onPageChange(page + 1)}
           disabled={!hasNextPage}
@@ -198,7 +369,6 @@ function Pagination({ pagination, onPageChange }: PaginationProps) {
         </button>
       </div>
 
-      {/* Jump-to-page input for large sets */}
       {totalPages > 5 && (
         <div className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400">
           <label htmlFor="jump-to-page" className="whitespace-nowrap">
@@ -210,7 +380,7 @@ function Pagination({ pagination, onPageChange }: PaginationProps) {
             min={1}
             max={totalPages}
             defaultValue={page}
-            key={page} // reset when page changes externally
+            key={page}
             onKeyDown={(e) => {
               if (e.key === 'Enter') {
                 const val = parseInt((e.target as HTMLInputElement).value, 10);
@@ -236,8 +406,8 @@ export default function ManagePDFs() {
   const { isAdmin } = useStore();
 
   // Data state
-  const [pdfs, setPdfs]             = useState<PDF[]>([]);
-  const [pagination, setPagination] = useState<PaginationMeta | null>(null);
+  const [pdfs, setPdfs]               = useState<PDF[]>([]);
+  const [pagination, setPagination]   = useState<PaginationMeta | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
 
   // Supporting data
@@ -246,7 +416,7 @@ export default function ManagePDFs() {
   const [courses,      setCourses]      = useState<Course[]>([]);
   const [universities, setUniversities] = useState<University[]>([]);
 
-  // UI state
+  // UI state — single-upload modal
   const [loading,      setLoading]      = useState(true);
   const [uploading,    setUploading]    = useState(false);
   const [showModal,    setShowModal]    = useState(false);
@@ -254,34 +424,30 @@ export default function ManagePDFs() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [isHydrated,   setIsHydrated]   = useState(false);
 
-  // ── Server-side filters (sent to API) ────────
-  // These are the "committed" values used in the actual API call
+  // UI state — bulk-upload modal
+  const [showBulkModal,    setShowBulkModal]    = useState(false);
+  const [bulkUploading,    setBulkUploading]    = useState(false);
+  const [bulkFiles,        setBulkFiles]        = useState<File[]>([]);
+  const [bulkSubjectId,    setBulkSubjectId]    = useState('');
+  const [bulkCategory,     setBulkCategory]     = useState<'notes' | 'assignments' | 'papers' | 'other'>('other');
+  const [bulkDescription,  setBulkDescription]  = useState('');
+  const [bulkResults,      setBulkResults]      = useState<BulkFileResult[] | null>(null);
+  const [bulkSummary,      setBulkSummary]      = useState<{ uploaded: number; failed: number } | null>(null);
+
+  // ── Server-side filters ───────────────────────
   const [searchQuery,    setSearchQuery]    = useState('');
   const [filterSubject,  setFilterSubject]  = useState<string>('all');
   const [filterCategory, setFilterCategory] = useState<string>('all');
 
-  // Debounce ref for search input so we don't fire on every keystroke
   const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Form
+  // Form (single upload)
   const [formData, setFormData] = useState<PDF>(emptyFormData);
 
-  // Wait for Zustand to hydrate from localStorage
-  useEffect(() => {
-    setIsHydrated(true);
-  }, []);
+  useEffect(() => { setIsHydrated(true); }, []);
 
   // ── Data fetching ────────────────────────────
 
-  /**
-   * Fetch a page of PDFs from the backend with all active filters applied
-   * at the database level. Pagination totals always reflect the FILTERED dataset.
-   *
-   * @param page          - 1-based page number
-   * @param overrideSearch    - optional: use a different search value (for debounced input)
-   * @param overrideSubject   - optional: use a different subject filter
-   * @param overrideCategory  - optional: use a different category filter
-   */
   const fetchPDFs = useCallback(
     async (
       page = 1,
@@ -296,29 +462,25 @@ export default function ManagePDFs() {
         const subject  = overrideSubject  !== undefined ? overrideSubject  : filterSubject;
         const category = overrideCategory !== undefined ? overrideCategory : filterCategory;
 
-        // Build query string – all filters go to the server
         const params = new URLSearchParams({
           page:     String(page),
           limit:    String(PAGE_SIZE),
           paginate: 'true',
         });
 
-        if (search.trim())          params.set('search',    search.trim());
-        if (subject  !== 'all')     params.set('subjectId', subject);
-        if (category !== 'all')     params.set('category',  category);
+        if (search.trim())       params.set('search',    search.trim());
+        if (subject  !== 'all')  params.set('subjectId', subject);
+        if (category !== 'all')  params.set('category',  category);
 
-        const res = await fetch(`/api/pdfs?${params.toString()}`, {
+        const res  = await fetch(`/api/pdfs?${params.toString()}`, {
           cache:   'no-store',
           headers: { 'Cache-Control': 'no-cache' },
         });
-
         const data = await res.json();
 
         if (data.success) {
           setPdfs(data.data);
-          if (data.pagination) {
-            setPagination(data.pagination);
-          }
+          if (data.pagination) setPagination(data.pagination);
           setCurrentPage(page);
         }
       } catch (error) {
@@ -330,28 +492,28 @@ export default function ManagePDFs() {
     [searchQuery, filterSubject, filterCategory]
   );
 
-  const fetchSubjects = async () => {
+  const fetchSubjects     = async () => {
     try {
-      const res  = await fetch('/api/subjects', { cache: 'no-store', headers: { 'Cache-Control': 'no-cache' } });
+      const res  = await fetch('/api/subjects',     { cache: 'no-store', headers: { 'Cache-Control': 'no-cache' } });
       const data = await res.json();
       if (data.success) setSubjects(data.data);
-    } catch (error) { console.error('Error fetching subjects:', error); }
+    } catch (e) { console.error(e); }
   };
 
-  const fetchSemesters = async () => {
+  const fetchSemesters    = async () => {
     try {
-      const res  = await fetch('/api/semesters', { cache: 'no-store', headers: { 'Cache-Control': 'no-cache' } });
+      const res  = await fetch('/api/semesters',    { cache: 'no-store', headers: { 'Cache-Control': 'no-cache' } });
       const data = await res.json();
       if (data.success) setSemesters(data.data);
-    } catch (error) { console.error('Error fetching semesters:', error); }
+    } catch (e) { console.error(e); }
   };
 
-  const fetchCourses = async () => {
+  const fetchCourses      = async () => {
     try {
-      const res  = await fetch('/api/courses', { cache: 'no-store', headers: { 'Cache-Control': 'no-cache' } });
+      const res  = await fetch('/api/courses',      { cache: 'no-store', headers: { 'Cache-Control': 'no-cache' } });
       const data = await res.json();
       if (data.success) setCourses(data.data);
-    } catch (error) { console.error('Error fetching courses:', error); }
+    } catch (e) { console.error(e); }
   };
 
   const fetchUniversities = async () => {
@@ -359,7 +521,7 @@ export default function ManagePDFs() {
       const res  = await fetch('/api/universities', { cache: 'no-store', headers: { 'Cache-Control': 'no-cache' } });
       const data = await res.json();
       if (data.success) setUniversities(data.data);
-    } catch (error) { console.error('Error fetching universities:', error); }
+    } catch (e) { console.error(e); }
   };
 
   useEffect(() => {
@@ -376,29 +538,19 @@ export default function ManagePDFs() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAdmin, router, isHydrated]);
 
-  // ── Filter change handlers ───────────────────
-  // Each filter change resets to page 1 and re-fetches from server
+  // ── Filter handlers ──────────────────────────
 
   const handleSearchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value;
     setSearchQuery(value);
-
-    // Debounce: wait 350 ms after the user stops typing before firing the API call
     if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
     searchDebounceRef.current = setTimeout(() => {
       fetchPDFs(1, value, undefined, undefined);
     }, 350);
   };
 
-  const handleSubjectChange = (value: string) => {
-    setFilterSubject(value);
-    fetchPDFs(1, undefined, value, undefined);
-  };
-
-  const handleCategoryChange = (value: string) => {
-    setFilterCategory(value);
-    fetchPDFs(1, undefined, undefined, value);
-  };
+  const handleSubjectChange  = (value: string) => { setFilterSubject(value);  fetchPDFs(1, undefined, value, undefined); };
+  const handleCategoryChange = (value: string) => { setFilterCategory(value); fetchPDFs(1, undefined, undefined, value); };
 
   const handleClearFilters = () => {
     if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
@@ -408,22 +560,17 @@ export default function ManagePDFs() {
     fetchPDFs(1, '', 'all', 'all');
   };
 
-  // ── Page navigation ──────────────────────────
-
   const handlePageChange = (page: number) => {
     fetchPDFs(page);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  // ── File upload helpers ──────────────────────
+  // ── Single-upload helpers ─────────────────────
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      if (file.type !== 'application/pdf') {
-        alert('Please select a PDF file');
-        return;
-      }
+      if (file.type !== 'application/pdf') { alert('Please select a PDF file'); return; }
       setSelectedFile(file);
       setFormData({ ...formData, fileName: file.name, fileSize: file.size });
     }
@@ -435,13 +582,9 @@ export default function ManagePDFs() {
     try {
       const fd = new FormData();
       fd.append('file', file);
-
       const res  = await fetch('/api/pdfs/upload', { method: 'POST', body: fd });
       const data = await res.json();
-
-      if (data.success) {
-        return { url: data.data.url, publicId: data.data.publicId, size: data.data.size };
-      }
+      if (data.success) return { url: data.data.url, publicId: data.data.publicId, size: data.data.size };
       alert(`Upload error: ${data.error}`);
       return null;
     } catch (error) {
@@ -451,7 +594,7 @@ export default function ManagePDFs() {
     }
   };
 
-  // ── Modal helpers ────────────────────────────
+  // ── Single modal helpers ──────────────────────
 
   const handleOpenModal = () => {
     setEditingId(null);
@@ -464,7 +607,7 @@ export default function ManagePDFs() {
     setEditingId(pdf._id || null);
     setSelectedFile(null);
     setFormData({
-      subjectId: pdf.subjectId,
+      subjectId:   pdf.subjectId,
       title:       pdf.title,
       description: pdf.description,
       fileName:    pdf.fileName,
@@ -480,6 +623,100 @@ export default function ManagePDFs() {
     setEditingId(null);
     setSelectedFile(null);
     setFormData(emptyFormData);
+  };
+
+  // ── Bulk modal helpers ────────────────────────
+
+  const handleOpenBulkModal = () => {
+    setBulkFiles([]);
+    setBulkSubjectId('');
+    setBulkCategory('other');
+    setBulkDescription('');
+    setBulkResults(null);
+    setBulkSummary(null);
+    setShowBulkModal(true);
+  };
+
+  const handleCloseBulkModal = () => {
+    if (bulkUploading) return; // prevent closing during upload
+    setShowBulkModal(false);
+    setBulkFiles([]);
+    setBulkSubjectId('');
+    setBulkCategory('other');
+    setBulkDescription('');
+    setBulkResults(null);
+    setBulkSummary(null);
+  };
+
+  const handleBulkFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const fileList = e.target.files;
+    if (!fileList) return;
+
+    const validFiles: File[]  = [];
+    const invalidNames: string[] = [];
+
+    Array.from(fileList).forEach((file) => {
+      if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
+        validFiles.push(file);
+      } else {
+        invalidNames.push(file.name);
+      }
+    });
+
+    if (invalidNames.length > 0) {
+      alert(`The following files are not PDFs and were skipped:\n${invalidNames.join('\n')}`);
+    }
+
+    setBulkFiles((prev) => {
+      // Deduplicate by name+size
+      const existing = new Set(prev.map((f) => `${f.name}-${f.size}`));
+      const fresh    = validFiles.filter((f) => !existing.has(`${f.name}-${f.size}`));
+      return [...prev, ...fresh];
+    });
+
+    // Reset input so the same files can be re-selected if needed
+    e.target.value = '';
+  };
+
+  const handleRemoveBulkFile = (index: number) => {
+    setBulkFiles((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const handleBulkSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    if (!bulkSubjectId) { alert('Please select a subject'); return; }
+    if (bulkFiles.length === 0) { alert('Please select at least one PDF file'); return; }
+
+    setBulkUploading(true);
+    setBulkResults(null);
+    setBulkSummary(null);
+
+    try {
+      const fd = new FormData();
+      fd.append('subjectId',   bulkSubjectId);
+      fd.append('category',    bulkCategory);
+      fd.append('description', bulkDescription);
+
+      bulkFiles.forEach((file) => fd.append('files', file));
+
+      const res  = await fetch('/api/pdfs/upload/bulk', { method: 'POST', body: fd });
+      const data = await res.json();
+
+      if (data.success || (data.data?.uploaded > 0)) {
+        setBulkResults(data.data?.results ?? []);
+        setBulkSummary({ uploaded: data.data?.uploaded ?? 0, failed: data.data?.failed ?? 0 });
+        // Refresh PDF list to show newly uploaded files
+        fetchPDFs(1);
+      } else {
+        alert(`Bulk upload error: ${data.error || 'Unknown error'}`);
+      }
+    } catch (error) {
+      console.error('Bulk upload error:', error);
+      alert('Failed to perform bulk upload. Please try again.');
+    } finally {
+      setBulkUploading(false);
+    }
   };
 
   // ── CRUD operations ──────────────────────────
@@ -503,16 +740,13 @@ export default function ManagePDFs() {
 
       if (selectedFile) {
         const uploadResult = await uploadFile(selectedFile);
-        if (!uploadResult) {
-          setUploading(false);
-          return;
-        }
+        if (!uploadResult) { setUploading(false); return; }
         pdfData = {
           ...pdfData,
-          fileUrl:             uploadResult.url,
-          cloudinaryPublicId:  uploadResult.publicId,
-          fileSize:            uploadResult.size,
-          fileName:            selectedFile.name,
+          fileUrl:            uploadResult.url,
+          cloudinaryPublicId: uploadResult.publicId,
+          fileSize:           uploadResult.size,
+          fileName:           selectedFile.name,
         };
       }
 
@@ -530,7 +764,6 @@ export default function ManagePDFs() {
       if (data.success) {
         alert(editingId ? 'PDF updated successfully!' : 'PDF added successfully!');
         handleCloseModal();
-        // Refresh current page (keeps active filters intact)
         fetchPDFs(currentPage);
       } else {
         alert(`Error: ${data.error}`);
@@ -547,18 +780,13 @@ export default function ManagePDFs() {
     if (!confirm(`Are you sure you want to delete "${title}"?`)) return;
 
     try {
-      // Optimistic removal from current view
       setPdfs((prev) => prev.filter((pdf) => pdf._id !== id));
 
-      const response = await fetch(`/api/pdfs/${id}`, {
-        method: 'DELETE',
-        cache:  'no-store',
-      });
-      const data = await response.json();
+      const response = await fetch(`/api/pdfs/${id}`, { method: 'DELETE', cache: 'no-store' });
+      const data     = await response.json();
 
       if (data.success) {
         alert('PDF deleted successfully!');
-        // If we deleted the last item on this page, go back one page
         const newPage = pdfs.length === 1 && currentPage > 1 ? currentPage - 1 : currentPage;
         fetchPDFs(newPage);
       } else {
@@ -575,16 +803,12 @@ export default function ManagePDFs() {
   const handlePdfClick = (pdf: PDF) => {
     const subject    = subjects.find((s) => s._id === pdf.subjectId);
     if (!subject?.slug) return;
-
     const semester   = semesters.find((s) => s._id === subject.semesterId);
     if (!semester?.slug) return;
-
     const course     = courses.find((c) => c._id === subject.courseId);
     if (!course?.slug) return;
-
     const university = universities.find((u) => u._id === course.universityId);
     if (!university?.slug) return;
-
     router.push(
       `/universities/${university.slug}/courses/${course.slug}/semesters/${semester.slug}/subjects/${subject.slug}/pdfs`
     );
@@ -603,7 +827,7 @@ export default function ManagePDFs() {
   const hasActiveFilters =
     searchQuery !== '' || filterSubject !== 'all' || filterCategory !== 'all';
 
-  // ── Guard: wait for hydration / auth ─────────
+  // ── Guard ────────────────────────────────────
 
   if (!isHydrated || !isAdmin) return null;
 
@@ -629,15 +853,22 @@ export default function ManagePDFs() {
             <h1 className="text-4xl font-bold text-gray-900 dark:text-white">
               Manage PDFs
             </h1>
-            <Button onClick={handleOpenModal}>
-              <Plus className="h-4 w-4 mr-2" />
-              Add PDF
-            </Button>
+
+            {/* Action buttons — "+ Add Many" to the left of "+ Add PDF" */}
+            <div className="flex items-center gap-3">
+              <Button variant="outline" onClick={handleOpenBulkModal}>
+                <Files className="h-4 w-4 mr-2" />
+                Add Many
+              </Button>
+              <Button onClick={handleOpenModal}>
+                <Plus className="h-4 w-4 mr-2" />
+                Add PDF
+              </Button>
+            </div>
           </div>
 
-          {/* Search & Filter row — all server-side */}
+          {/* Search & Filter row */}
           <div className="space-y-4 mt-6">
-            {/* Search input with debounce */}
             <div className="flex flex-col sm:flex-row gap-4">
               <div className="relative flex-1">
                 <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
@@ -692,10 +923,9 @@ export default function ManagePDFs() {
                                focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                   >
                     <option value="all">All Categories</option>
-                    <option value="notes">Notes</option>
-                    <option value="assignments">Assignments</option>
-                    <option value="papers">Papers</option>
-                    <option value="other">Other</option>
+                    {CATEGORY_OPTIONS.map((c) => (
+                      <option key={c.value} value={c.value}>{c.label}</option>
+                    ))}
                   </select>
                 </div>
               </div>
@@ -709,8 +939,6 @@ export default function ManagePDFs() {
                     Clear All Filters
                   </button>
                 )}
-
-                {/* Accurate count always from pagination metadata */}
                 <div className="text-sm text-gray-600 dark:text-gray-400 whitespace-nowrap">
                   {pagination
                     ? hasActiveFilters
@@ -751,17 +979,13 @@ export default function ManagePDFs() {
               {pdfs.map((pdf) => (
                 <Card key={pdf._id} hover={true}>
                   <div className="flex justify-between items-start">
-                    {/* Clickable content area */}
                     <div
                       className="flex-1 cursor-pointer"
                       onClick={() => handlePdfClick(pdf)}
                       role="button"
                       tabIndex={0}
                       onKeyDown={(e) => {
-                        if (e.key === 'Enter' || e.key === ' ') {
-                          e.preventDefault();
-                          handlePdfClick(pdf);
-                        }
+                        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handlePdfClick(pdf); }
                       }}
                     >
                       <h3 className="text-xl font-bold text-gray-900 dark:text-white mb-2
@@ -785,13 +1009,9 @@ export default function ManagePDFs() {
                       </div>
                     </div>
 
-                    {/* Action buttons */}
                     <div className="flex space-x-2 ml-4">
                       <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleEditModal(pdf);
-                        }}
+                        onClick={(e) => { e.stopPropagation(); handleEditModal(pdf); }}
                         className="p-2 text-blue-600 hover:bg-blue-50 dark:text-blue-400
                                    dark:hover:bg-blue-900/20 rounded transition-colors"
                         title="Edit PDF"
@@ -799,10 +1019,7 @@ export default function ManagePDFs() {
                         <Edit2 className="h-5 w-5" />
                       </button>
                       <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleDelete(pdf._id || '', pdf.title);
-                        }}
+                        onClick={(e) => { e.stopPropagation(); handleDelete(pdf._id || '', pdf.title); }}
                         className="p-2 text-red-600 hover:bg-red-50 dark:text-red-400
                                    dark:hover:bg-red-900/20 rounded transition-colors"
                         title="Delete PDF"
@@ -815,14 +1032,15 @@ export default function ManagePDFs() {
               ))}
             </div>
 
-            {/* Pagination always reflects the filtered total */}
             {pagination && (
               <Pagination pagination={pagination} onPageChange={handlePageChange} />
             )}
           </>
         )}
 
-        {/* ── Upload / Edit Modal ───────────────────────── */}
+        {/* ═══════════════════════════════════════════════════════════════
+            ── Single Upload / Edit Modal ──────────────────────────────
+            ═══════════════════════════════════════════════════════════════ */}
         {showModal && (
           <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
             <div className="bg-white dark:bg-gray-800 rounded-lg max-w-2xl w-full max-h-[90vh] overflow-y-auto">
@@ -841,28 +1059,18 @@ export default function ManagePDFs() {
 
                 <form onSubmit={handleSubmit} className="space-y-4">
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {/* Subject */}
+                    {/* Subject — searchable */}
                     <div>
                       <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
                         Subject *
                       </label>
-                      <select
-                        required
+                      <SearchableSubjectDropdown
+                        subjects={subjects}
                         value={formData.subjectId}
-                        onChange={(e) =>
-                          setFormData({ ...formData, subjectId: e.target.value })
-                        }
-                        className="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg
-                                   bg-white dark:bg-gray-700 text-gray-900 dark:text-white
-                                   focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                      >
-                        <option value="">Select Subject</option>
-                        {subjects.map((sub) => (
-                          <option key={sub._id} value={sub._id}>
-                            {sub.code} - {sub.name}
-                          </option>
-                        ))}
-                      </select>
+                        onChange={(v) => setFormData({ ...formData, subjectId: v })}
+                        placeholder="Select Subject"
+                        required
+                      />
                     </div>
 
                     {/* Category */}
@@ -879,10 +1087,9 @@ export default function ManagePDFs() {
                                    bg-white dark:bg-gray-700 text-gray-900 dark:text-white
                                    focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                       >
-                        <option value="notes">Notes</option>
-                        <option value="assignments">Assignments</option>
-                        <option value="papers">Papers</option>
-                        <option value="other">Other</option>
+                        {CATEGORY_OPTIONS.map((c) => (
+                          <option key={c.value} value={c.value}>{c.label}</option>
+                        ))}
                       </select>
                     </div>
                   </div>
@@ -961,23 +1168,296 @@ export default function ManagePDFs() {
                   </div>
 
                   <div className="flex justify-end space-x-3 pt-4">
-                    <Button
-                      type="button"
-                      variant="secondary"
-                      onClick={handleCloseModal}
-                      disabled={uploading}
-                    >
+                    <Button type="button" variant="secondary" onClick={handleCloseModal} disabled={uploading}>
                       Cancel
                     </Button>
                     <Button type="submit" disabled={uploading}>
-                      {uploading
-                        ? 'Uploading...'
-                        : editingId
-                        ? 'Update PDF'
-                        : 'Upload PDF'}
+                      {uploading ? 'Uploading...' : editingId ? 'Update PDF' : 'Upload PDF'}
                     </Button>
                   </div>
                 </form>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ═══════════════════════════════════════════════════════════════
+            ── Bulk Upload Modal ("+ Add Many") ────────────────────────
+            ═══════════════════════════════════════════════════════════════ */}
+        {showBulkModal && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+            <div className="bg-white dark:bg-gray-800 rounded-lg max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+              <div className="p-6">
+                {/* Modal header */}
+                <div className="flex justify-between items-center mb-6">
+                  <div>
+                    <h2 className="text-2xl font-bold text-gray-900 dark:text-white">
+                      Bulk Upload PDFs
+                    </h2>
+                    <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+                      Upload multiple PDFs at once — each file becomes a separate record.
+                    </p>
+                  </div>
+                  <button
+                    onClick={handleCloseBulkModal}
+                    disabled={bulkUploading}
+                    className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200
+                               disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    <X className="h-6 w-6" />
+                  </button>
+                </div>
+
+                {/* ── Results panel (shown after upload) ── */}
+                {bulkResults !== null && bulkSummary !== null ? (
+                  <div className="space-y-4">
+                    {/* Summary banner */}
+                    <div
+                      className={`flex items-center gap-3 p-4 rounded-lg ${
+                        bulkSummary.failed === 0
+                          ? 'bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800'
+                          : bulkSummary.uploaded === 0
+                          ? 'bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800'
+                          : 'bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800'
+                      }`}
+                    >
+                      {bulkSummary.failed === 0 ? (
+                        <CheckCircle2 className="h-6 w-6 text-green-600 dark:text-green-400 flex-shrink-0" />
+                      ) : (
+                        <AlertCircle className="h-6 w-6 text-yellow-600 dark:text-yellow-400 flex-shrink-0" />
+                      )}
+                      <div>
+                        <p className="font-semibold text-gray-900 dark:text-white">
+                          {bulkSummary.failed === 0
+                            ? `All ${bulkSummary.uploaded} file(s) uploaded successfully!`
+                            : `${bulkSummary.uploaded} uploaded, ${bulkSummary.failed} failed`}
+                        </p>
+                        {bulkSummary.failed > 0 && (
+                          <p className="text-sm text-gray-600 dark:text-gray-400">
+                            Check the failed files below for details.
+                          </p>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Per-file results */}
+                    <ul className="space-y-2 max-h-64 overflow-y-auto">
+                      {bulkResults.map((r, i) => (
+                        <li
+                          key={i}
+                          className={`flex items-start gap-3 px-3 py-2 rounded-lg text-sm ${
+                            r.success
+                              ? 'bg-green-50 dark:bg-green-900/10'
+                              : 'bg-red-50 dark:bg-red-900/10'
+                          }`}
+                        >
+                          {r.success ? (
+                            <CheckCircle2 className="h-4 w-4 text-green-600 dark:text-green-400 flex-shrink-0 mt-0.5" />
+                          ) : (
+                            <AlertCircle className="h-4 w-4 text-red-600 dark:text-red-400 flex-shrink-0 mt-0.5" />
+                          )}
+                          <div className="min-w-0">
+                            <p className="font-medium text-gray-900 dark:text-white truncate">
+                              {r.fileName}
+                            </p>
+                            {!r.success && r.error && (
+                              <p className="text-red-600 dark:text-red-400 text-xs">{r.error}</p>
+                            )}
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+
+                    {/* Close / Upload more */}
+                    <div className="flex justify-end gap-3 pt-2">
+                      <Button variant="secondary" onClick={handleCloseBulkModal}>
+                        Close
+                      </Button>
+                      <Button
+                        onClick={() => {
+                          setBulkResults(null);
+                          setBulkSummary(null);
+                          setBulkFiles([]);
+                        }}
+                      >
+                        Upload More
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  /* ── Upload form ── */
+                  <form onSubmit={handleBulkSubmit} className="space-y-5">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      {/* Subject — searchable */}
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                          Subject *
+                        </label>
+                        <SearchableSubjectDropdown
+                          subjects={subjects}
+                          value={bulkSubjectId}
+                          onChange={setBulkSubjectId}
+                          placeholder="Select Subject"
+                          required
+                        />
+                      </div>
+
+                      {/* Category */}
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                          Category
+                        </label>
+                        <select
+                          value={bulkCategory}
+                          onChange={(e) =>
+                            setBulkCategory(e.target.value as any)
+                          }
+                          className="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg
+                                     bg-white dark:bg-gray-700 text-gray-900 dark:text-white
+                                     focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                        >
+                          {CATEGORY_OPTIONS.map((c) => (
+                            <option key={c.value} value={c.value}>{c.label}</option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+
+                    {/* PDF Files — multiple */}
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                        PDF Files *
+                        <span className="ml-2 text-xs font-normal text-gray-500 dark:text-gray-400">
+                          (Title = file name, select multiple)
+                        </span>
+                      </label>
+
+                      {/* Drop-zone / picker */}
+                      <label className="block cursor-pointer">
+                        <div
+                          className="flex flex-col items-center justify-center gap-2 px-4 py-6
+                                     border-2 border-dashed border-gray-300 dark:border-gray-600
+                                     rounded-lg bg-gray-50 dark:bg-gray-700/50
+                                     hover:border-blue-400 dark:hover:border-blue-500
+                                     hover:bg-blue-50/40 dark:hover:bg-blue-900/10
+                                     transition-colors"
+                        >
+                          <Upload className="h-7 w-7 text-gray-400" />
+                          <p className="text-sm text-gray-600 dark:text-gray-400 text-center">
+                            <span className="text-blue-600 dark:text-blue-400 font-medium">
+                              Click to select
+                            </span>{' '}
+                            one or more PDF files
+                          </p>
+                          <p className="text-xs text-gray-400 dark:text-gray-500">
+                            PDF only · max 100 MB each
+                          </p>
+                        </div>
+                        <input
+                          type="file"
+                          accept=".pdf"
+                          multiple
+                          onChange={handleBulkFileSelect}
+                          className="hidden"
+                        />
+                      </label>
+
+                      {/* Selected files list */}
+                      {bulkFiles.length > 0 && (
+                        <div className="mt-3 space-y-1.5 max-h-48 overflow-y-auto pr-1">
+                          <p className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2">
+                            {bulkFiles.length} file{bulkFiles.length !== 1 ? 's' : ''} selected
+                          </p>
+                          {bulkFiles.map((file, idx) => (
+                            <div
+                              key={`${file.name}-${file.size}-${idx}`}
+                              className="flex items-center justify-between gap-2 px-3 py-2
+                                         bg-gray-50 dark:bg-gray-700 rounded-lg border
+                                         border-gray-200 dark:border-gray-600"
+                            >
+                              <div className="flex items-center gap-2 min-w-0">
+                                <FileText className="h-4 w-4 text-blue-500 flex-shrink-0" />
+                                <span className="text-sm text-gray-900 dark:text-white truncate">
+                                  {file.name}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-2 flex-shrink-0">
+                                <span className="text-xs text-gray-500 dark:text-gray-400">
+                                  {formatFileSize(file.size)}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => handleRemoveBulkFile(idx)}
+                                  className="p-0.5 text-gray-400 hover:text-red-500 dark:hover:text-red-400
+                                             transition-colors rounded"
+                                  title="Remove file"
+                                >
+                                  <X className="h-4 w-4" />
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Description (optional, shared) */}
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                        Description
+                        <span className="ml-2 text-xs font-normal text-gray-500 dark:text-gray-400">
+                          (optional — if blank, each PDF's description = its filename)
+                        </span>
+                      </label>
+                      <textarea
+                        value={bulkDescription}
+                        onChange={(e) => setBulkDescription(e.target.value)}
+                        className="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg
+                                   bg-white dark:bg-gray-700 text-gray-900 dark:text-white
+                                   placeholder:text-gray-500 dark:placeholder:text-gray-400
+                                   focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                        rows={3}
+                        placeholder="Shared description for all uploaded PDFs (leave blank to use filename)"
+                      />
+                    </div>
+
+                    {/* Upload progress indicator */}
+                    {bulkUploading && (
+                      <div className="flex items-center gap-3 px-4 py-3 bg-blue-50 dark:bg-blue-900/20
+                                       border border-blue-200 dark:border-blue-800 rounded-lg">
+                        <Loader2 className="h-5 w-5 text-blue-600 dark:text-blue-400 animate-spin flex-shrink-0" />
+                        <div>
+                          <p className="text-sm font-medium text-blue-700 dark:text-blue-300">
+                            Uploading {bulkFiles.length} file{bulkFiles.length !== 1 ? 's' : ''}…
+                          </p>
+                          <p className="text-xs text-blue-600 dark:text-blue-400">
+                            Please do not close this window.
+                          </p>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="flex justify-end space-x-3 pt-2">
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        onClick={handleCloseBulkModal}
+                        disabled={bulkUploading}
+                      >
+                        Cancel
+                      </Button>
+                      <Button
+                        type="submit"
+                        disabled={bulkUploading || bulkFiles.length === 0}
+                        loading={bulkUploading}
+                      >
+                        {bulkUploading
+                          ? `Uploading ${bulkFiles.length} file${bulkFiles.length !== 1 ? 's' : ''}…`
+                          : `Upload ${bulkFiles.length > 0 ? bulkFiles.length + ' ' : ''}PDF${bulkFiles.length !== 1 ? 's' : ''}`}
+                      </Button>
+                    </div>
+                  </form>
+                )}
               </div>
             </div>
           </div>
