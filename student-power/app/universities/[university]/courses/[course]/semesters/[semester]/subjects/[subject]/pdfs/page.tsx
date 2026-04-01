@@ -392,6 +392,7 @@ export default function PDFsPage() {
           fileUrl={selectedPDF.fileUrl}
           fileName={selectedPDF.fileName}
           title={selectedPDF.title}
+          pdfId={selectedPDF._id?.toString()}
           onClose={() => setSelectedPDF(null)}
         />
       )}

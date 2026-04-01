@@ -1,43 +1,76 @@
-import { NextRequest, NextResponse } from 'next/server';
-
 /**
- * Groq AI Chat API Route
- * Handles AI-powered PDF summarization, question answering, and chat.
+ * Groq AI Chat API Route — RAG Edition
  *
- * Migration Note: Replaced Perplexity AI with Groq AI.
- * - Uses GROQ_API_KEY environment variable
- * - Model: llama-3.3-70b-versatile (OpenAI-compatible API)
- * - Response structure is identical; no frontend changes required
+ * ═══════════════════════════════════════════════════════════════════
+ * WHAT CHANGED (RAG Upgrade)
+ * ═══════════════════════════════════════════════════════════════════
  *
- * Supported actions:
- *   POST { action: "summarize",          pdfText }
- *   POST { action: "generate_questions", pdfText }
- *   POST { action: "answer",             pdfText, question }
- *   POST { action: "chat",               pdfText, message, conversationHistory? }
+ * BEFORE (inefficient):
+ *   • Client sent full pdfText (~10 000 chars) in every POST body
+ *   • Server truncated it to the first 10 000 chars (missed later content)
+ *   • ~2 500 input tokens wasted per request regardless of question
+ *   • Answers could be inaccurate because relevant content was cut off
  *
- * GET  – health / config check
+ * AFTER (RAG):
+ *   Mode A — pdfId provided (preferred):
+ *     1. Client sends only { action, pdfId, question }  (no raw text)
+ *     2. Server calls /api/ai/chunks internally to get top-K relevant chunks
+ *     3. Only those chunks (~1 500–2 500 chars) go to Groq
+ *     Token saving: ~70–80 % fewer input tokens
+ *
+ *   Mode B — pdfText provided (backwards-compatible fallback):
+ *     1. Client sends { action, pdfText, question } (legacy behaviour)
+ *     2. Server cleans + chunks the text in-memory
+ *     3. Retrieves top-K relevant chunks and sends only those to Groq
+ *     Token saving: ~60–70 % vs old substring approach
+ *
+ * ═══════════════════════════════════════════════════════════════════
+ * SUPPORTED ACTIONS
+ * ═══════════════════════════════════════════════════════════════════
+ *
+ *   POST { action: "summarize",          pdfId }
+ *   POST { action: "summarize",          pdfText }           ← fallback
+ *   POST { action: "generate_questions", pdfId }
+ *   POST { action: "generate_questions", pdfText }           ← fallback
+ *   POST { action: "answer",             pdfId,    question }
+ *   POST { action: "answer",             pdfText,  question } ← fallback
+ *   POST { action: "chat",               pdfId,    message, conversationHistory? }
+ *   POST { action: "chat",               pdfText,  message, conversationHistory? }
+ *
+ *   GET — health / configuration check
+ *
+ * ═══════════════════════════════════════════════════════════════════
+ * ENVIRONMENT VARIABLES
+ * ═══════════════════════════════════════════════════════════════════
+ *   GROQ_API_KEY  — https://console.groq.com/keys
  */
 
-// ──────────────────────────────────────────────
-// Configuration
-// ──────────────────────────────────────────────
+import { NextRequest, NextResponse } from 'next/server';
+import {
+  cleanExtractedText,
+  splitIntoChunks,
+  retrieveRelevantChunks,
+  buildOptimizedPrompt,
+  TextChunk,
+  MAX_CHUNKS_PER_REQUEST,
+} from '@/lib/ai/pdf-analyzer';
+
+// ── Configuration ─────────────────────────────────────────────────────────────
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 
 /**
- * Primary model – llama-3.3-70b-versatile is excellent for academic tasks.
- * Fallback: "llama3-8b-8192" for lower latency on simple requests.
+ * llama-3.3-70b-versatile: high quality, generous free-tier context window.
+ * Fallback to llama3-8b-8192 for lower-latency needs.
  */
 const MODEL = 'llama-3.3-70b-versatile';
 
-// ──────────────────────────────────────────────
-// POST handler
-// ──────────────────────────────────────────────
+// ── POST handler ──────────────────────────────────────────────────────────────
 
 export async function POST(request: NextRequest) {
   try {
-    // ── 1. Validate API key ─────────────────
+    // ── 1. Validate API key ──────────────────────────────────────────────────
     if (!GROQ_API_KEY || GROQ_API_KEY.trim() === '') {
       console.error('❌ Groq API key is not configured');
       return NextResponse.json(
@@ -49,152 +82,164 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    console.log('✅ Groq API key configured, processing request...');
-
-    // ── 2. Parse request body ───────────────
+    // ── 2. Parse request body ────────────────────────────────────────────────
     const body = await request.json();
-    const { action, question, pdfText, message, conversationHistory } = body;
+    const {
+      action,
+      question,
+      pdfText,   // legacy / fallback: raw PDF text from client
+      pdfId,     // preferred: MongoDB ID, used to fetch pre-stored chunks
+      message,
+      conversationHistory,
+      chunks: clientChunks, // optional: client may send pre-computed chunks
+    } = body;
 
-    if (!pdfText || pdfText.trim().length === 0) {
+    if (!action) {
       return NextResponse.json(
-        { error: 'No PDF content provided' },
+        { error: 'action is required (summarize | generate_questions | answer | chat)' },
         { status: 400 }
       );
     }
 
-    // Truncate text to stay within safe token limits
-    const truncatedText =
-      pdfText.length > 10_000 ? pdfText.substring(0, 10_000) + '...' : pdfText;
+    // ── 3. Resolve relevant chunks ───────────────────────────────────────────
+    //
+    // TOKEN SAVING EXPLANATION:
+    //   We never send the full pdfText to Groq anymore.
+    //   Instead we resolve the smallest set of chunks that contain
+    //   the answer, dramatically cutting input token usage.
+    //
+    //   Priority order for chunk resolution:
+    //     1. clientChunks  — pre-scored by the client (fastest)
+    //     2. pdfId         — server-side DB lookup (most accurate, no raw text transfer)
+    //     3. pdfText       — in-memory chunking fallback (backwards-compatible)
 
-    // ── 3. Build message array per action ───
-    let messages: { role: string; content: string }[] = [];
+    let relevantChunks: TextChunk[] = [];
+    const questionText = question || message || '';
 
-    if (action === 'summarize') {
-      // Extract a topic hint from the first 500 chars of the document
-      const topicMatch = truncatedText
-        .substring(0, 500)
-        .match(/(?:Chapter|Unit|Section|Topic|Subject)?\s*:?\s*([A-Z][^\n]{10,100})/);
-      const topic = topicMatch ? topicMatch[1].trim() : 'Document Content';
+    if (clientChunks && Array.isArray(clientChunks) && clientChunks.length > 0) {
+      // ── Path 1: Client already sent pre-selected chunks ──────────────────
+      // This is the lightest path — minimal DB and compute overhead.
+      // Used when PDFViewer has in-memory chunks from a previous extraction.
+      relevantChunks = clientChunks.slice(0, MAX_CHUNKS_PER_REQUEST);
 
-      messages = [
-        {
-          role: 'system',
-          content:
-            'You are an expert academic assistant specialized in creating well-structured, hierarchical summaries of educational documents. Your summaries must be clear, academically precise, and easy to understand. Use markdown formatting with proper heading levels (# for main title, ## for major sections, ### for subsections). Focus on extracting key concepts, definitions, explanations, and relationships between ideas.',
-        },
-        {
-          role: 'user',
-          content: `Please create a comprehensive academic summary of the following document content. Format your response as follows:
+    } else if (pdfId && typeof pdfId === 'string') {
+      // ── Path 2: Server-side DB retrieval (preferred production path) ─────
+      // The client sends ONLY pdfId + question (no raw text).
+      // We query MongoDB for the relevant chunks — no full text in transit.
+      //
+      // TOKEN SAVING: request payload shrinks from ~10 000 chars to ~100 chars.
+      try {
+        const baseUrl = request.nextUrl.origin;
+        const chunkUrl = new URL('/api/ai/chunks', baseUrl);
+        chunkUrl.searchParams.set('pdfId', pdfId);
+        if (questionText.trim()) {
+          chunkUrl.searchParams.set('question', questionText);
+        }
+        chunkUrl.searchParams.set('topK', String(MAX_CHUNKS_PER_REQUEST));
 
-# Summary of ${topic}
+        const chunkResponse = await fetch(chunkUrl.toString(), {
+          headers: { 'Content-Type': 'application/json' },
+        });
 
-Then organize the content into 2-3 major sections using ## headings, with subsections using ### headings where appropriate. Each section should:
-- Provide clear, academically precise explanations
-- Include key concepts and definitions
-- Explain relationships between ideas
-- Use bullet points for clarity where helpful
-- Maintain an easy-to-read but academic tone
+        if (chunkResponse.ok) {
+          const chunkData = await chunkResponse.json();
+          if (chunkData.success && chunkData.chunks?.length > 0) {
+            relevantChunks = chunkData.chunks;
+            console.log(
+              `📦 Retrieved ${relevantChunks.length} chunks via ${chunkData.meta?.retrievalMethod} ` +
+              `(~${chunkData.meta?.estimatedTokens} tokens)`
+            );
+          }
+        }
+      } catch (dbErr) {
+        console.warn('⚠️ DB chunk retrieval failed, falling back to pdfText:', dbErr);
+      }
+    }
 
-Document Content:
-${truncatedText}`,
-        },
-      ];
-    } else if (action === 'generate_questions') {
-      const topicMatch = truncatedText
-        .substring(0, 500)
-        .match(/(?:Chapter|Unit|Section|Topic|Subject)?\s*:?\s*([A-Z][^\n]{10,100})/);
-      const topic = topicMatch ? topicMatch[1].trim() : 'this topic';
-
-      messages = [
-        {
-          role: 'system',
-          content:
-            'You are an expert academic assistant specialized in generating important conceptual and applied questions from educational documents. Your questions should test understanding, application, and critical thinking. Generate questions that cover the main concepts, theories, definitions, applications, and relationships presented in the document.',
-        },
-        {
-          role: 'user',
-          content: `Based on the provided document content, generate 10-12 important questions related to "${topic}".
-
-Format your response EXACTLY as follows:
-
-Based on the provided document content, important questions (imp questions) related to '${topic}' could include:
-
-1. [First question - conceptual or definition-based]
-2. [Second question - application-based]
-3. [Third question - analytical]
-... continue through 10-12 questions
-
-Make questions diverse: include conceptual questions, application questions, comparison questions, and analytical questions. Ensure all questions are directly relevant to the document content.
-
-Document Content:
-${truncatedText}`,
-        },
-      ];
-    } else if (action === 'answer') {
-      if (!question || question.trim().length === 0) {
+    // ── Path 3: In-memory fallback (legacy pdfText) ──────────────────────────
+    // If no chunks resolved from DB, fall back to processing pdfText.
+    // This preserves backwards compatibility for clients not yet sending pdfId.
+    //
+    // TOKEN SAVING vs. OLD behaviour:
+    //   Old: pdfText.substring(0, 10_000) sent directly to Groq (no filtering)
+    //   New: pdfText cleaned → chunked → top-K retrieved → only relevant chunks sent
+    if (relevantChunks.length === 0) {
+      if (!pdfText || pdfText.trim().length === 0) {
         return NextResponse.json(
-          { error: 'No question provided' },
+          { error: 'No PDF content available. Provide pdfId or pdfText.' },
           { status: 400 }
         );
       }
 
-      messages = [
-        {
-          role: 'system',
-          content:
-            'You are a helpful AI assistant that answers questions based on the provided document content. Provide accurate, detailed answers based primarily on the information in the document. Use clear academic language and structure your answers well. If the answer requires information beyond the document, clearly indicate this.',
-        },
-        {
-          role: 'user',
-          content: `Document content:\n${truncatedText}\n\nQuestion: ${question}\n\nPlease provide a comprehensive answer based on the document content above. Structure your answer clearly and use academic language.`,
-        },
-      ];
-    } else if (action === 'chat') {
-      if (!message || message.trim().length === 0) {
+      console.log(
+        `⚙️  In-memory RAG fallback: cleaning and chunking ${pdfText.length} chars of pdfText`
+      );
+
+      const cleaned = cleanExtractedText(pdfText);
+      const allChunks = splitIntoChunks(cleaned);
+
+      if (allChunks.length === 0) {
         return NextResponse.json(
-          { error: 'No message provided' },
-          { status: 400 }
+          { error: 'Could not extract usable text from PDF' },
+          { status: 422 }
         );
       }
 
-      messages = [
-        {
-          role: 'system',
-          content: `You are a helpful AI assistant discussing the content of a document. Here is the document content:\n\n${truncatedText}\n\nAnswer questions and discuss topics based on this document.`,
-        },
-        ...(conversationHistory || []),
-        {
-          role: 'user',
-          content: message,
-        },
-      ];
-    } else {
+      // For answer/chat: retrieve relevant chunks; for others: use first N
+      if (action === 'answer' || action === 'chat') {
+        relevantChunks = retrieveRelevantChunks(questionText, allChunks, MAX_CHUNKS_PER_REQUEST);
+      } else {
+        // summarize / generate_questions — use top of document
+        relevantChunks = allChunks.slice(0, MAX_CHUNKS_PER_REQUEST);
+      }
+    }
+
+    if (relevantChunks.length === 0) {
       return NextResponse.json(
-        {
-          error:
-            'Invalid action. Must be "summarize", "generate_questions", "answer", or "chat"',
-        },
-        { status: 400 }
+        { error: 'No relevant content found in PDF for this query.' },
+        { status: 422 }
       );
     }
 
-    // ── 4. Call Groq API ────────────────────
-    console.log(`📤 Sending "${action}" request to Groq AI...`);
+    // ── 4. Validate action-specific inputs ───────────────────────────────────
+    if ((action === 'answer') && !questionText.trim()) {
+      return NextResponse.json({ error: 'No question provided' }, { status: 400 });
+    }
+    if (action === 'chat' && !questionText.trim()) {
+      return NextResponse.json({ error: 'No message provided' }, { status: 400 });
+    }
 
+    // ── 5. Build optimised RAG prompt ────────────────────────────────────────
+    //
+    // buildOptimizedPrompt assembles ONLY the selected chunks (not full PDF).
+    // It also applies minimal system prompts and capped max_tokens:
+    //   summarize        → max_tokens: 600  (was 800)
+    //   generate_questions → max_tokens: 800  (was 1 000)
+    //   answer / chat    → max_tokens: 400  (was 600–800)
+    //
+    // Combined with sending only 3–5 chunks instead of full text,
+    // total token usage per request drops by ~70–80 %.
+    const { messages, max_tokens, temperature } = buildOptimizedPrompt(
+      action as 'summarize' | 'generate_questions' | 'answer' | 'chat',
+      relevantChunks,
+      questionText,
+      conversationHistory
+    );
+
+    // Log token estimate (helps verify savings in logs)
+    const contextWords = relevantChunks.reduce((s, c) => s + (c.wordCount || 0), 0);
+    const estimatedInputTokens = Math.round(contextWords * 1.33);
+    console.log(
+      `📤 Sending "${action}" to Groq | chunks: ${relevantChunks.length} | ` +
+      `~${estimatedInputTokens} context tokens | max_tokens: ${max_tokens}`
+    );
+
+    // ── 6. Call Groq API ─────────────────────────────────────────────────────
     const requestBody = {
       model: MODEL,
       messages,
-      // Token budgets tuned per action type
-      max_tokens:
-        action === 'summarize' ? 800 : action === 'generate_questions' ? 1_000 : 600,
-      temperature:
-        action === 'summarize'
-          ? 0.3
-          : action === 'generate_questions'
-          ? 0.4
-          : action === 'answer'
-          ? 0.2
-          : 0.5,
+      max_tokens,
+      temperature,
       top_p: 0.9,
       stream: false,
     };
@@ -208,16 +253,13 @@ ${truncatedText}`,
       body: JSON.stringify(requestBody),
     });
 
-    // ── 5. Handle API errors ────────────────
+    // ── 7. Handle API errors ─────────────────────────────────────────────────
     if (!response.ok) {
       const errorText = await response.text();
       console.error('❌ Groq API Error:', {
         status: response.status,
-        statusText: response.statusText,
         body: errorText,
-        apiKeyPreview: GROQ_API_KEY
-          ? `${GROQ_API_KEY.substring(0, 10)}...`
-          : 'NOT SET',
+        apiKeyPreview: GROQ_API_KEY ? `${GROQ_API_KEY.substring(0, 10)}...` : 'NOT SET',
       });
 
       let errorMessage = 'Failed to process request';
@@ -225,46 +267,32 @@ ${truncatedText}`,
 
       if (response.status === 401) {
         errorMessage = 'Authentication failed. Invalid Groq API key.';
-        userFriendlyMessage =
-          'The Groq API key is invalid or expired. Please verify your GROQ_API_KEY.';
+        userFriendlyMessage = 'The Groq API key is invalid or expired.';
       } else if (response.status === 400) {
         errorMessage = 'Bad request';
-        userFriendlyMessage = `Invalid request format. ${errorText}`;
-        console.error(
-          '📝 Request body that caused error:',
-          JSON.stringify(requestBody, null, 2)
-        );
+        userFriendlyMessage = `Invalid request: ${errorText}`;
       } else if (response.status === 429) {
         errorMessage = 'Rate limit exceeded';
         userFriendlyMessage = 'Too many requests. Please wait a moment and try again.';
       } else if (response.status === 403) {
         errorMessage = 'Access forbidden';
-        userFriendlyMessage =
-          'API access denied. Check your subscription and permissions.';
+        userFriendlyMessage = 'API access denied. Check your subscription.';
       } else {
         userFriendlyMessage = `API error: ${response.statusText}`;
       }
 
       return NextResponse.json(
-        {
-          error: errorMessage,
-          message: userFriendlyMessage,
-          details: errorText,
-          status: response.status,
-        },
+        { error: errorMessage, message: userFriendlyMessage, status: response.status },
         { status: response.status }
       );
     }
 
-    // ── 6. Parse and return response ────────
+    // ── 8. Parse and return response ─────────────────────────────────────────
     const data = await response.json();
 
-    console.log('✅ Response received from Groq AI');
-
     if (!data.choices || data.choices.length === 0) {
-      console.error('❌ Invalid response structure:', data);
       return NextResponse.json(
-        { error: 'No response received from AI', details: 'API returned empty choices' },
+        { error: 'No response from AI', details: 'Empty choices array' },
         { status: 500 }
       );
     }
@@ -272,7 +300,8 @@ ${truncatedText}`,
     const aiResponse: string = data.choices[0].message.content;
 
     console.log(
-      `✅ "${action}" completed successfully. Response length: ${aiResponse.length} chars`
+      `✅ "${action}" completed | response: ${aiResponse.length} chars | ` +
+      `usage: ${JSON.stringify(data.usage)}`
     );
 
     return NextResponse.json({
@@ -280,13 +309,17 @@ ${truncatedText}`,
       response: aiResponse,
       usage: data.usage,
       action,
+      // Return RAG metadata so the client can display token savings info
+      rag: {
+        chunksUsed: relevantChunks.length,
+        estimatedInputTokens,
+      },
     });
   } catch (error: any) {
     console.error('❌ Groq AI Chat API error:', error);
     return NextResponse.json(
       {
         error: error.message || 'Internal server error',
-        details: error.stack || 'No stack trace available',
         type: error.name || 'UnknownError',
       },
       { status: 500 }
@@ -294,13 +327,11 @@ ${truncatedText}`,
   }
 }
 
-// ──────────────────────────────────────────────
-// GET handler – health / configuration check
-// ──────────────────────────────────────────────
+// ── GET handler — health / configuration check ────────────────────────────────
 
 /**
  * GET /api/ai/chat
- * Returns current configuration status (no sensitive data exposed).
+ * Returns configuration status without exposing sensitive values.
  */
 export async function GET() {
   const hasApiKey = !!GROQ_API_KEY && GROQ_API_KEY.trim() !== '';
@@ -308,14 +339,14 @@ export async function GET() {
   return NextResponse.json({
     status: hasApiKey ? 'ok' : 'error',
     message: hasApiKey
-      ? 'Groq AI Chat API is running and configured'
+      ? 'Groq AI Chat API is running (RAG mode)'
       : 'GROQ_API_KEY is not configured',
     provider: 'Groq',
     model: MODEL,
+    ragEnabled: true,
+    maxChunksPerRequest: MAX_CHUNKS_PER_REQUEST,
     apiKeyConfigured: hasApiKey,
-    apiKeyPreview: hasApiKey
-      ? `${GROQ_API_KEY.substring(0, 10)}...`
-      : 'NOT SET',
+    apiKeyPreview: hasApiKey ? `${GROQ_API_KEY.substring(0, 10)}...` : 'NOT SET',
     timestamp: new Date().toISOString(),
   });
 }

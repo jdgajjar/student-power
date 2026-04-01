@@ -36,7 +36,7 @@ const nextConfig = {
   
   // Optimize package imports
   experimental: {
-    optimizePackageImports: ['lucide-react', '@xenova/transformers'],
+    optimizePackageImports: ['lucide-react'],
   },
   
   // Image optimization configuration
