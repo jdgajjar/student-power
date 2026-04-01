@@ -6,7 +6,7 @@ import { Download, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Loader2, MessageS
 import Button from '../ui/Button';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-// Using Perplexity AI API instead of local models for better performance
+// Using Groq AI API (via /api/ai/chat) instead of local models for better performance
 import 'react-pdf/dist/Page/AnnotationLayer.css';
 import 'react-pdf/dist/Page/TextLayer.css';
 
@@ -242,7 +242,7 @@ export default function PDFViewer({ fileUrl, fileName, title, onClose }: PDFView
       setIsGeneratingSummary(true);
       setSummary('');
       
-      // Call Perplexity AI API for summarization
+      // Call Groq AI API for summarization
       const response = await fetch('/api/ai/chat', {
         method: 'POST',
         headers: {
@@ -281,7 +281,7 @@ export default function PDFViewer({ fileUrl, fileName, title, onClose }: PDFView
       setIsGeneratingQuestions(true);
       setQuestions('');
       
-      // Call Perplexity AI API for question generation
+      // Call Groq AI API for question generation
       const response = await fetch('/api/ai/chat', {
         method: 'POST',
         headers: {
@@ -325,7 +325,7 @@ export default function PDFViewer({ fileUrl, fileName, title, onClose }: PDFView
       setIsAnswering(true);
       setAnswer('');
       
-      // Call Perplexity AI API for question answering
+      // Call Groq AI API for question answering
       const response = await fetch('/api/ai/chat', {
         method: 'POST',
         headers: {
@@ -733,7 +733,7 @@ export default function PDFViewer({ fileUrl, fileName, title, onClose }: PDFView
 
                   <div className="text-xs text-gray-500 dark:text-gray-400 p-3 bg-blue-50 dark:bg-blue-900/20 rounded mt-4">
                     <p className="font-medium mb-1">🤖 Enhanced AI Analysis</p>
-                    <p>Powered by Perplexity AI with improved prompts for academic content. Generates structured summaries, important questions, and detailed answers.</p>
+                    <p>Powered by Groq AI with improved prompts for academic content. Generates structured summaries, important questions, and detailed answers.</p>
                   </div>
                 </div>
               </div>
