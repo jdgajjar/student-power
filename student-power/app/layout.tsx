@@ -5,6 +5,10 @@ import Footer from "@/components/ui/Footer";
 import ErrorBoundary from "@/components/ui/ErrorBoundary";
 import GoogleAnalytics from "@/components/analytics/GoogleAnalytics";
 import GoogleSearchConsole from "@/components/analytics/GoogleSearchConsole";
+import {
+  GoogleTagManagerScript,
+  GoogleTagManagerNoScript,
+} from "@/components/analytics/GoogleTagManager";
 import { generateHomeMetadata } from "@/lib/seo/metadata";
 import { generateOrganizationSchema, generateWebsiteSchema } from "@/lib/seo/structured-data";
 
@@ -24,6 +28,9 @@ export default function RootLayout({
       <head>
         <meta charSet="utf-8" />
         <link rel="icon" href="/icons/fab.png" />
+        {/* Google Tag Manager - Script (loads as early as possible) */}
+        <GoogleTagManagerScript />
+
         <GoogleSearchConsole />
         
         {/* Structured Data */}
@@ -37,6 +44,9 @@ export default function RootLayout({
         />
       </head>
       <body className="min-h-screen bg-gray-50 dark:bg-gray-900 flex flex-col antialiased">
+        {/* Google Tag Manager - NoScript fallback (immediately after <body>) */}
+        <GoogleTagManagerNoScript />
+
         {/* Google Analytics */}
         <GoogleAnalytics />
         
