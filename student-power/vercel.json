@@ -3,6 +3,9 @@
   "functions": {
     "app/api/pdfs/upload/route.ts": {
       "maxDuration": 60
+    },
+    "app/api/pdfs/upload/bulk/route.ts": {
+      "maxDuration": 300
     }
   }
 }
