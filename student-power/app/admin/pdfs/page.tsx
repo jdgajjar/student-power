@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { useStore } from '@/lib/store';
 import Button from '@/components/ui/Button';
@@ -15,6 +15,7 @@ import {
   Trash2,
   ChevronLeft,
   ChevronRight,
+  Search,
 } from 'lucide-react';
 
 // ──────────────────────────────────────────────
@@ -105,14 +106,8 @@ function Pagination({ pagination, onPageChange }: PaginationProps) {
    * Build a compact page-number list.
    * Always shows: page 1, current page ± 1, last page.
    * Inserts '…' wherever there is a gap larger than 1.
-   *
-   * Examples (totalPages = 10):
-   *   page 1  → [1, 2, '...', 10]
-   *   page 5  → [1, '...', 4, 5, 6, '...', 10]
-   *   page 9  → [1, '...', 8, 9, 10]
    */
   const buildPageNumbers = (): (number | '...')[] => {
-    // Build a sorted, deduplicated set of page numbers to always show
     const pageSet = new Set<number>();
     pageSet.add(1);
     pageSet.add(totalPages);
@@ -134,9 +129,8 @@ function Pagination({ pagination, onPageChange }: PaginationProps) {
   };
 
   const pageNumbers = buildPageNumbers();
-
   const startItem = (page - 1) * limit + 1;
-  const endItem = Math.min(page * limit, total);
+  const endItem   = Math.min(page * limit, total);
 
   return (
     <div className="mt-8 flex flex-col items-center gap-4">
@@ -238,32 +232,36 @@ function Pagination({ pagination, onPageChange }: PaginationProps) {
 // ──────────────────────────────────────────────
 
 export default function ManagePDFs() {
-  const router = useRouter();
+  const router      = useRouter();
   const { isAdmin } = useStore();
 
   // Data state
-  const [pdfs, setPdfs] = useState<PDF[]>([]);
+  const [pdfs, setPdfs]             = useState<PDF[]>([]);
   const [pagination, setPagination] = useState<PaginationMeta | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
 
   // Supporting data
-  const [subjects, setSubjects] = useState<Subject[]>([]);
-  const [semesters, setSemesters] = useState<Semester[]>([]);
-  const [courses, setCourses] = useState<Course[]>([]);
+  const [subjects,     setSubjects]     = useState<Subject[]>([]);
+  const [semesters,    setSemesters]    = useState<Semester[]>([]);
+  const [courses,      setCourses]      = useState<Course[]>([]);
   const [universities, setUniversities] = useState<University[]>([]);
 
   // UI state
-  const [loading, setLoading] = useState(true);
-  const [uploading, setUploading] = useState(false);
-  const [showModal, setShowModal] = useState(false);
-  const [editingId, setEditingId] = useState<string | null>(null);
+  const [loading,      setLoading]      = useState(true);
+  const [uploading,    setUploading]    = useState(false);
+  const [showModal,    setShowModal]    = useState(false);
+  const [editingId,    setEditingId]    = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [isHydrated, setIsHydrated] = useState(false);
+  const [isHydrated,   setIsHydrated]   = useState(false);
 
-  // Filters
-  const [searchQuery, setSearchQuery] = useState('');
-  const [filterSubject, setFilterSubject] = useState<string>('all');
+  // ── Server-side filters (sent to API) ────────
+  // These are the "committed" values used in the actual API call
+  const [searchQuery,    setSearchQuery]    = useState('');
+  const [filterSubject,  setFilterSubject]  = useState<string>('all');
   const [filterCategory, setFilterCategory] = useState<string>('all');
+
+  // Debounce ref for search input so we don't fire on every keystroke
+  const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Form
   const [formData, setFormData] = useState<PDF>(emptyFormData);
@@ -276,23 +274,41 @@ export default function ManagePDFs() {
   // ── Data fetching ────────────────────────────
 
   /**
-   * Fetch a single page of PDFs from the backend.
-   * Resets to page 1 whenever filters change.
+   * Fetch a page of PDFs from the backend with all active filters applied
+   * at the database level. Pagination totals always reflect the FILTERED dataset.
+   *
+   * @param page          - 1-based page number
+   * @param overrideSearch    - optional: use a different search value (for debounced input)
+   * @param overrideSubject   - optional: use a different subject filter
+   * @param overrideCategory  - optional: use a different category filter
    */
   const fetchPDFs = useCallback(
-    async (page = 1) => {
+    async (
+      page = 1,
+      overrideSearch?: string,
+      overrideSubject?: string,
+      overrideCategory?: string,
+    ) => {
       try {
         setLoading(true);
 
-        // Build query string with pagination + optional filters
+        const search   = overrideSearch   !== undefined ? overrideSearch   : searchQuery;
+        const subject  = overrideSubject  !== undefined ? overrideSubject  : filterSubject;
+        const category = overrideCategory !== undefined ? overrideCategory : filterCategory;
+
+        // Build query string – all filters go to the server
         const params = new URLSearchParams({
-          page: String(page),
-          limit: String(PAGE_SIZE),
+          page:     String(page),
+          limit:    String(PAGE_SIZE),
           paginate: 'true',
         });
 
+        if (search.trim())          params.set('search',    search.trim());
+        if (subject  !== 'all')     params.set('subjectId', subject);
+        if (category !== 'all')     params.set('category',  category);
+
         const res = await fetch(`/api/pdfs?${params.toString()}`, {
-          cache: 'no-store',
+          cache:   'no-store',
           headers: { 'Cache-Control': 'no-cache' },
         });
 
@@ -311,64 +327,43 @@ export default function ManagePDFs() {
         setLoading(false);
       }
     },
-    [] // no filter deps here – filtering is done client-side for instant UX
+    [searchQuery, filterSubject, filterCategory]
   );
 
   const fetchSubjects = async () => {
     try {
-      const res = await fetch('/api/subjects', {
-        cache: 'no-store',
-        headers: { 'Cache-Control': 'no-cache' },
-      });
+      const res  = await fetch('/api/subjects', { cache: 'no-store', headers: { 'Cache-Control': 'no-cache' } });
       const data = await res.json();
       if (data.success) setSubjects(data.data);
-    } catch (error) {
-      console.error('Error fetching subjects:', error);
-    }
+    } catch (error) { console.error('Error fetching subjects:', error); }
   };
 
   const fetchSemesters = async () => {
     try {
-      const res = await fetch('/api/semesters', {
-        cache: 'no-store',
-        headers: { 'Cache-Control': 'no-cache' },
-      });
+      const res  = await fetch('/api/semesters', { cache: 'no-store', headers: { 'Cache-Control': 'no-cache' } });
       const data = await res.json();
       if (data.success) setSemesters(data.data);
-    } catch (error) {
-      console.error('Error fetching semesters:', error);
-    }
+    } catch (error) { console.error('Error fetching semesters:', error); }
   };
 
   const fetchCourses = async () => {
     try {
-      const res = await fetch('/api/courses', {
-        cache: 'no-store',
-        headers: { 'Cache-Control': 'no-cache' },
-      });
+      const res  = await fetch('/api/courses', { cache: 'no-store', headers: { 'Cache-Control': 'no-cache' } });
       const data = await res.json();
       if (data.success) setCourses(data.data);
-    } catch (error) {
-      console.error('Error fetching courses:', error);
-    }
+    } catch (error) { console.error('Error fetching courses:', error); }
   };
 
   const fetchUniversities = async () => {
     try {
-      const res = await fetch('/api/universities', {
-        cache: 'no-store',
-        headers: { 'Cache-Control': 'no-cache' },
-      });
+      const res  = await fetch('/api/universities', { cache: 'no-store', headers: { 'Cache-Control': 'no-cache' } });
       const data = await res.json();
       if (data.success) setUniversities(data.data);
-    } catch (error) {
-      console.error('Error fetching universities:', error);
-    }
+    } catch (error) { console.error('Error fetching universities:', error); }
   };
 
   useEffect(() => {
     if (!isHydrated) return;
-
     if (!isAdmin) {
       router.push('/admin/login');
     } else {
@@ -378,17 +373,45 @@ export default function ManagePDFs() {
       fetchCourses();
       fetchUniversities();
     }
-  }, [isAdmin, router, isHydrated, fetchPDFs]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAdmin, router, isHydrated]);
+
+  // ── Filter change handlers ───────────────────
+  // Each filter change resets to page 1 and re-fetches from server
+
+  const handleSearchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const value = e.target.value;
+    setSearchQuery(value);
+
+    // Debounce: wait 350 ms after the user stops typing before firing the API call
+    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    searchDebounceRef.current = setTimeout(() => {
+      fetchPDFs(1, value, undefined, undefined);
+    }, 350);
+  };
+
+  const handleSubjectChange = (value: string) => {
+    setFilterSubject(value);
+    fetchPDFs(1, undefined, value, undefined);
+  };
+
+  const handleCategoryChange = (value: string) => {
+    setFilterCategory(value);
+    fetchPDFs(1, undefined, undefined, value);
+  };
+
+  const handleClearFilters = () => {
+    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    setSearchQuery('');
+    setFilterSubject('all');
+    setFilterCategory('all');
+    fetchPDFs(1, '', 'all', 'all');
+  };
 
   // ── Page navigation ──────────────────────────
 
   const handlePageChange = (page: number) => {
-    // Reset client-side filters when navigating pages to avoid confusion
-    setSearchQuery('');
-    setFilterSubject('all');
-    setFilterCategory('all');
     fetchPDFs(page);
-    // Scroll back to top of list
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
@@ -413,7 +436,7 @@ export default function ManagePDFs() {
       const fd = new FormData();
       fd.append('file', file);
 
-      const res = await fetch('/api/pdfs/upload', { method: 'POST', body: fd });
+      const res  = await fetch('/api/pdfs/upload', { method: 'POST', body: fd });
       const data = await res.json();
 
       if (data.success) {
@@ -442,12 +465,12 @@ export default function ManagePDFs() {
     setSelectedFile(null);
     setFormData({
       subjectId: pdf.subjectId,
-      title: pdf.title,
+      title:       pdf.title,
       description: pdf.description,
-      fileName: pdf.fileName,
-      fileUrl: pdf.fileUrl,
-      fileSize: pdf.fileSize,
-      category: pdf.category,
+      fileName:    pdf.fileName,
+      fileUrl:     pdf.fileUrl,
+      fileSize:    pdf.fileSize,
+      category:    pdf.category,
     });
     setShowModal(true);
   };
@@ -486,30 +509,29 @@ export default function ManagePDFs() {
         }
         pdfData = {
           ...pdfData,
-          fileUrl: uploadResult.url,
-          cloudinaryPublicId: uploadResult.publicId,
-          fileSize: uploadResult.size,
-          fileName: selectedFile.name,
+          fileUrl:             uploadResult.url,
+          cloudinaryPublicId:  uploadResult.publicId,
+          fileSize:            uploadResult.size,
+          fileName:            selectedFile.name,
         };
       }
 
-      const url = editingId ? `/api/pdfs/${editingId}` : '/api/pdfs';
+      const url    = editingId ? `/api/pdfs/${editingId}` : '/api/pdfs';
       const method = editingId ? 'PUT' : 'POST';
 
-      const res = await fetch(url, {
+      const res  = await fetch(url, {
         method,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(pdfData),
-        cache: 'no-store',
+        body:    JSON.stringify(pdfData),
+        cache:   'no-store',
       });
-
       const data = await res.json();
 
       if (data.success) {
         alert(editingId ? 'PDF updated successfully!' : 'PDF added successfully!');
         handleCloseModal();
-        // Refresh current page to reflect changes
-        setTimeout(() => fetchPDFs(currentPage), 100);
+        // Refresh current page (keeps active filters intact)
+        fetchPDFs(currentPage);
       } else {
         alert(`Error: ${data.error}`);
       }
@@ -525,21 +547,20 @@ export default function ManagePDFs() {
     if (!confirm(`Are you sure you want to delete "${title}"?`)) return;
 
     try {
-      // Optimistic removal from the current page view
+      // Optimistic removal from current view
       setPdfs((prev) => prev.filter((pdf) => pdf._id !== id));
 
       const response = await fetch(`/api/pdfs/${id}`, {
         method: 'DELETE',
-        cache: 'no-store',
+        cache:  'no-store',
       });
       const data = await response.json();
 
       if (data.success) {
         alert('PDF deleted successfully!');
-        // Refresh – if we deleted the last item on a page, go to the previous page
-        const newPage =
-          pdfs.length === 1 && currentPage > 1 ? currentPage - 1 : currentPage;
-        setTimeout(() => fetchPDFs(newPage), 100);
+        // If we deleted the last item on this page, go back one page
+        const newPage = pdfs.length === 1 && currentPage > 1 ? currentPage - 1 : currentPage;
+        fetchPDFs(newPage);
       } else {
         alert(`Error: ${data.error}`);
         fetchPDFs(currentPage);
@@ -552,13 +573,13 @@ export default function ManagePDFs() {
   };
 
   const handlePdfClick = (pdf: PDF) => {
-    const subject = subjects.find((s) => s._id === pdf.subjectId);
+    const subject    = subjects.find((s) => s._id === pdf.subjectId);
     if (!subject?.slug) return;
 
-    const semester = semesters.find((s) => s._id === subject.semesterId);
+    const semester   = semesters.find((s) => s._id === subject.semesterId);
     if (!semester?.slug) return;
 
-    const course = courses.find((c) => c._id === subject.courseId);
+    const course     = courses.find((c) => c._id === subject.courseId);
     if (!course?.slug) return;
 
     const university = universities.find((u) => u._id === course.universityId);
@@ -573,28 +594,11 @@ export default function ManagePDFs() {
 
   const formatFileSize = (bytes: number): string => {
     if (bytes === 0) return '0 Bytes';
-    const k = 1024;
+    const k     = 1024;
     const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    const i     = Math.floor(Math.log(bytes) / Math.log(k));
     return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + ' ' + sizes[i];
   };
-
-  /**
-   * Client-side filter applied on top of the current page's data.
-   * This gives instant feedback without an extra round-trip.
-   * Pagination still operates on the full dataset server-side.
-   */
-  const filteredPDFs = pdfs.filter((pdf) => {
-    const matchesSearch =
-      searchQuery === '' ||
-      pdf.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      pdf.description.toLowerCase().includes(searchQuery.toLowerCase());
-
-    const matchesSubject = filterSubject === 'all' || pdf.subjectId === filterSubject;
-    const matchesCategory = filterCategory === 'all' || pdf.category === filterCategory;
-
-    return matchesSearch && matchesSubject && matchesCategory;
-  });
 
   const hasActiveFilters =
     searchQuery !== '' || filterSubject !== 'all' || filterCategory !== 'all';
@@ -631,19 +635,25 @@ export default function ManagePDFs() {
             </Button>
           </div>
 
-          {/* Search & Filter row */}
+          {/* Search & Filter row — all server-side */}
           <div className="space-y-4 mt-6">
+            {/* Search input with debounce */}
             <div className="flex flex-col sm:flex-row gap-4">
-              <input
-                type="text"
-                placeholder="Search PDFs on this page by title or description..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="flex-1 px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg
-                           bg-white dark:bg-gray-700 text-gray-900 dark:text-white
-                           placeholder:text-gray-500 dark:placeholder:text-gray-400
-                           focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              />
+              <div className="relative flex-1">
+                <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                  <Search className="h-5 w-5 text-gray-400" />
+                </div>
+                <input
+                  type="text"
+                  placeholder="Search PDFs by title or description..."
+                  value={searchQuery}
+                  onChange={handleSearchChange}
+                  className="w-full pl-10 pr-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg
+                             bg-white dark:bg-gray-700 text-gray-900 dark:text-white
+                             placeholder:text-gray-500 dark:placeholder:text-gray-400
+                             focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                />
+              </div>
             </div>
 
             <div className="flex flex-col sm:flex-row gap-4 items-start sm:items-center">
@@ -655,7 +665,7 @@ export default function ManagePDFs() {
                   </label>
                   <select
                     value={filterSubject}
-                    onChange={(e) => setFilterSubject(e.target.value)}
+                    onChange={(e) => handleSubjectChange(e.target.value)}
                     className="w-full sm:w-48 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg
                                bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm
                                focus:ring-2 focus:ring-blue-500 focus:border-transparent"
@@ -676,7 +686,7 @@ export default function ManagePDFs() {
                   </label>
                   <select
                     value={filterCategory}
-                    onChange={(e) => setFilterCategory(e.target.value)}
+                    onChange={(e) => handleCategoryChange(e.target.value)}
                     className="w-full sm:w-48 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg
                                bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm
                                focus:ring-2 focus:ring-blue-500 focus:border-transparent"
@@ -693,22 +703,19 @@ export default function ManagePDFs() {
               <div className="flex flex-col sm:flex-row gap-2 items-start sm:items-center w-full sm:w-auto">
                 {hasActiveFilters && (
                   <button
-                    onClick={() => {
-                      setSearchQuery('');
-                      setFilterSubject('all');
-                      setFilterCategory('all');
-                    }}
+                    onClick={handleClearFilters}
                     className="text-sm text-blue-600 dark:text-blue-400 hover:underline whitespace-nowrap"
                   >
                     Clear All Filters
                   </button>
                 )}
 
+                {/* Accurate count always from pagination metadata */}
                 <div className="text-sm text-gray-600 dark:text-gray-400 whitespace-nowrap">
-                  {hasActiveFilters
-                    ? `Showing ${filteredPDFs.length} of ${pdfs.length} on this page`
-                    : pagination
-                    ? `Page ${pagination.page} of ${pagination.totalPages} (${pagination.total} total)`
+                  {pagination
+                    ? hasActiveFilters
+                      ? `${pagination.total} result${pagination.total !== 1 ? 's' : ''} found`
+                      : `Page ${pagination.page} of ${pagination.totalPages} (${pagination.total} total)`
                     : `${pdfs.length} PDFs`}
                 </div>
               </div>
@@ -725,20 +732,23 @@ export default function ManagePDFs() {
           <div className="text-center py-12">
             <FileText className="h-16 w-16 mx-auto text-gray-400 mb-4" />
             <p className="text-gray-600 dark:text-gray-400">
-              No PDFs found. Upload your first PDF!
+              {hasActiveFilters
+                ? 'No PDFs match your search or filters. Try adjusting them.'
+                : 'No PDFs found. Upload your first PDF!'}
             </p>
-          </div>
-        ) : filteredPDFs.length === 0 ? (
-          <div className="text-center py-12">
-            <FileText className="h-16 w-16 mx-auto text-gray-400 mb-4" />
-            <p className="text-gray-600 dark:text-gray-400">
-              No PDFs match your filters. Try adjusting your search or filters.
-            </p>
+            {hasActiveFilters && (
+              <button
+                onClick={handleClearFilters}
+                className="mt-3 text-sm text-blue-600 dark:text-blue-400 hover:underline"
+              >
+                Clear filters
+              </button>
+            )}
           </div>
         ) : (
           <>
             <div className="grid md:grid-cols-2 gap-6">
-              {filteredPDFs.map((pdf) => (
+              {pdfs.map((pdf) => (
                 <Card key={pdf._id} hover={true}>
                   <div className="flex justify-between items-start">
                     {/* Clickable content area */}
@@ -805,8 +815,8 @@ export default function ManagePDFs() {
               ))}
             </div>
 
-            {/* Pagination – only shown when not filtering client-side */}
-            {!hasActiveFilters && pagination && (
+            {/* Pagination always reflects the filtered total */}
+            {pagination && (
               <Pagination pagination={pagination} onPageChange={handlePageChange} />
             )}
           </>

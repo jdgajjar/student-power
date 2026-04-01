@@ -15,6 +15,8 @@ const DEFAULT_PAGE_SIZE = 10;
  * Query parameters
  * ─────────────────────────────────────────────────────────
  * subjectId  – (optional) filter PDFs belonging to a specific subject
+ * category   – (optional) filter by category: notes | assignments | papers | other
+ * search     – (optional) full-text search on title and description (case-insensitive)
  * page       – (optional) 1-based page number; enables pagination
  * limit      – (optional) results per page (default: 10, max: 100)
  * paginate   – (optional) set to "true" to force paginated response even for page 1
@@ -25,6 +27,9 @@ const DEFAULT_PAGE_SIZE = 10;
  *
  * Without those params the original flat response is preserved for
  * backwards compatibility with non-admin routes (e.g. the public subject PDF list).
+ *
+ * NOTE: All filters (subjectId, category, search) are applied at the DATABASE level
+ * so pagination totals are always accurate across the full filtered dataset.
  */
 export async function GET(request: NextRequest) {
   try {
@@ -34,23 +39,44 @@ export async function GET(request: NextRequest) {
 
     // ── Filter params ──────────────────────────────────
     const subjectId = searchParams.get('subjectId');
+    const category  = searchParams.get('category');   // NEW: category filter
+    const search    = searchParams.get('search');      // NEW: full-text search
 
     // ── Pagination params ──────────────────────────────
-    const pageParam = searchParams.get('page');
-    const limitParam = searchParams.get('limit');
+    const pageParam     = searchParams.get('page');
+    const limitParam    = searchParams.get('limit');
     const paginateParam = searchParams.get('paginate');
 
     // Decide whether to paginate:
     // • explicit page= query → paginate
     // • paginate=true        → paginate (useful for admin panel first load)
-    // • subjectId only       → legacy flat response (public subject pages)
+    // • subjectId only (no page/paginate) → legacy flat response (public subject pages)
     const shouldPaginate = pageParam !== null || paginateParam === 'true';
 
-    const query = subjectId ? { subjectId } : {};
+    // ── Build MongoDB query object ─────────────────────
+    // All filters are applied at DB level so count + data are always consistent
+    const query: Record<string, any> = {};
+
+    if (subjectId) {
+      query.subjectId = subjectId;
+    }
+
+    if (category && category !== 'all') {
+      query.category = category;
+    }
+
+    if (search && search.trim() !== '') {
+      // Case-insensitive regex search across title and description
+      const searchRegex = new RegExp(search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      query.$or = [
+        { title: { $regex: searchRegex } },
+        { description: { $regex: searchRegex } },
+      ];
+    }
 
     if (shouldPaginate) {
       // ── Paginated path ─────────────────────────────────
-      const page = Math.max(1, parseInt(pageParam || '1', 10));
+      const page  = Math.max(1, parseInt(pageParam || '1', 10));
       const limit = Math.min(
         100,
         Math.max(1, parseInt(limitParam || String(DEFAULT_PAGE_SIZE), 10))
@@ -68,7 +94,7 @@ export async function GET(request: NextRequest) {
           .lean(),
       ]);
 
-      const totalPages = Math.ceil(total / limit);
+      const totalPages = Math.max(1, Math.ceil(total / limit));
 
       return NextResponse.json(
         {
@@ -94,6 +120,7 @@ export async function GET(request: NextRequest) {
       );
     } else {
       // ── Legacy flat path (backwards-compatible) ────────
+      // Still applies subjectId / category / search filters
       const pdfs = await PDF.find(query)
         .select('-__v')
         .sort({ uploadedAt: -1 })
