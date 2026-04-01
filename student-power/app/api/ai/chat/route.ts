@@ -1,37 +1,57 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 /**
- * Perplexity AI Chat API Route
- * Handles AI-powered PDF summarization, question answering, and chat
- * 
- * Fixed Issues:
- * - Proper API key validation with detailed error messages
- * - Support for both PERPLEXITY_API_KEY and NEXT_PUBLIC_PERPLEXITY_API_KEY
- * - Enhanced error handling with user-friendly messages
- * - Better request validation
+ * Groq AI Chat API Route
+ * Handles AI-powered PDF summarization, question answering, and chat.
+ *
+ * Migration Note: Replaced Perplexity AI with Groq AI.
+ * - Uses GROQ_API_KEY environment variable
+ * - Model: llama-3.3-70b-versatile (OpenAI-compatible API)
+ * - Response structure is identical; no frontend changes required
+ *
+ * Supported actions:
+ *   POST { action: "summarize",          pdfText }
+ *   POST { action: "generate_questions", pdfText }
+ *   POST { action: "answer",             pdfText, question }
+ *   POST { action: "chat",               pdfText, message, conversationHistory? }
+ *
+ * GET  – health / config check
  */
 
-// Get API key from environment variables (try both naming conventions)
-const PERPLEXITY_API_KEY = process.env.PERPLEXITY_API_KEY || process.env.NEXT_PUBLIC_PERPLEXITY_API_KEY || '';
-const PERPLEXITY_API_URL = 'https://api.perplexity.ai/chat/completions';
-const MODEL = 'sonar';
+// ──────────────────────────────────────────────
+// Configuration
+// ──────────────────────────────────────────────
+
+const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
+const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
+
+/**
+ * Primary model – llama-3.3-70b-versatile is excellent for academic tasks.
+ * Fallback: "llama3-8b-8192" for lower latency on simple requests.
+ */
+const MODEL = 'llama-3.3-70b-versatile';
+
+// ──────────────────────────────────────────────
+// POST handler
+// ──────────────────────────────────────────────
 
 export async function POST(request: NextRequest) {
   try {
-    // Validate API key first before processing request
-    if (!PERPLEXITY_API_KEY || PERPLEXITY_API_KEY.trim() === '') {
-      console.error('❌ Perplexity API key is not configured');
+    // ── 1. Validate API key ─────────────────
+    if (!GROQ_API_KEY || GROQ_API_KEY.trim() === '') {
+      console.error('❌ Groq API key is not configured');
       return NextResponse.json(
-        { 
-          error: 'API configuration error. Perplexity API key is missing.',
-          details: 'Please set PERPLEXITY_API_KEY or NEXT_PUBLIC_PERPLEXITY_API_KEY environment variable.'
+        {
+          error: 'API configuration error. Groq API key is missing.',
+          details: 'Please set GROQ_API_KEY environment variable.',
         },
         { status: 500 }
       );
     }
 
-    console.log('✅ API key configured, processing request...');
-    
+    console.log('✅ Groq API key configured, processing request...');
+
+    // ── 2. Parse request body ───────────────
     const body = await request.json();
     const { action, question, pdfText, message, conversationHistory } = body;
 
@@ -42,23 +62,25 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Truncate text if too long
-    const truncatedText = pdfText.length > 10000 
-      ? pdfText.substring(0, 10000) + '...' 
-      : pdfText;
+    // Truncate text to stay within safe token limits
+    const truncatedText =
+      pdfText.length > 10_000 ? pdfText.substring(0, 10_000) + '...' : pdfText;
 
-    let messages: any[] = [];
+    // ── 3. Build message array per action ───
+    let messages: { role: string; content: string }[] = [];
 
-    // Build messages based on action
     if (action === 'summarize') {
-      // Extract topic from first part of text
-      const topicMatch = truncatedText.substring(0, 500).match(/(?:Chapter|Unit|Section|Topic|Subject)?\s*:?\s*([A-Z][^\n]{10,100})/);
+      // Extract a topic hint from the first 500 chars of the document
+      const topicMatch = truncatedText
+        .substring(0, 500)
+        .match(/(?:Chapter|Unit|Section|Topic|Subject)?\s*:?\s*([A-Z][^\n]{10,100})/);
       const topic = topicMatch ? topicMatch[1].trim() : 'Document Content';
-      
+
       messages = [
         {
           role: 'system',
-          content: 'You are an expert academic assistant specialized in creating well-structured, hierarchical summaries of educational documents. Your summaries must be clear, academically precise, and easy to understand. Use markdown formatting with proper heading levels (# for main title, ## for major sections, ### for subsections). Focus on extracting key concepts, definitions, explanations, and relationships between ideas.',
+          content:
+            'You are an expert academic assistant specialized in creating well-structured, hierarchical summaries of educational documents. Your summaries must be clear, academically precise, and easy to understand. Use markdown formatting with proper heading levels (# for main title, ## for major sections, ### for subsections). Focus on extracting key concepts, definitions, explanations, and relationships between ideas.',
         },
         {
           role: 'user',
@@ -78,18 +100,20 @@ ${truncatedText}`,
         },
       ];
     } else if (action === 'generate_questions') {
-      // Extract topic from first part of text
-      const topicMatch = truncatedText.substring(0, 500).match(/(?:Chapter|Unit|Section|Topic|Subject)?\s*:?\s*([A-Z][^\n]{10,100})/);
+      const topicMatch = truncatedText
+        .substring(0, 500)
+        .match(/(?:Chapter|Unit|Section|Topic|Subject)?\s*:?\s*([A-Z][^\n]{10,100})/);
       const topic = topicMatch ? topicMatch[1].trim() : 'this topic';
-      
+
       messages = [
         {
           role: 'system',
-          content: 'You are an expert academic assistant specialized in generating important conceptual and applied questions from educational documents. Your questions should test understanding, application, and critical thinking. Generate questions that cover the main concepts, theories, definitions, applications, and relationships presented in the document.',
+          content:
+            'You are an expert academic assistant specialized in generating important conceptual and applied questions from educational documents. Your questions should test understanding, application, and critical thinking. Generate questions that cover the main concepts, theories, definitions, applications, and relationships presented in the document.',
         },
         {
           role: 'user',
-          content: `Based on the provided document content, generate 10-12 important questions related to "${topic}". 
+          content: `Based on the provided document content, generate 10-12 important questions related to "${topic}".
 
 Format your response EXACTLY as follows:
 
@@ -117,7 +141,8 @@ ${truncatedText}`,
       messages = [
         {
           role: 'system',
-          content: 'You are a helpful AI assistant that answers questions based on the provided document content. Provide accurate, detailed answers based primarily on the information in the document. Use clear academic language and structure your answers well. If the answer requires information beyond the document, clearly indicate this.',
+          content:
+            'You are a helpful AI assistant that answers questions based on the provided document content. Provide accurate, detailed answers based primarily on the information in the document. Use clear academic language and structure your answers well. If the answer requires information beyond the document, clearly indicate this.',
         },
         {
           role: 'user',
@@ -145,77 +170,97 @@ ${truncatedText}`,
       ];
     } else {
       return NextResponse.json(
-        { error: 'Invalid action. Must be "summarize", "generate_questions", "answer", or "chat"' },
+        {
+          error:
+            'Invalid action. Must be "summarize", "generate_questions", "answer", or "chat"',
+        },
         { status: 400 }
       );
     }
 
-    // Make request to Perplexity AI with detailed logging
-    console.log(`📤 Sending ${action} request to Perplexity AI...`);
-    
+    // ── 4. Call Groq API ────────────────────
+    console.log(`📤 Sending "${action}" request to Groq AI...`);
+
     const requestBody = {
       model: MODEL,
       messages,
-      max_tokens: action === 'summarize' ? 800 : (action === 'generate_questions' ? 1000 : 600),
-      temperature: action === 'summarize' ? 0.3 : (action === 'generate_questions' ? 0.4 : (action === 'answer' ? 0.2 : 0.5)),
+      // Token budgets tuned per action type
+      max_tokens:
+        action === 'summarize' ? 800 : action === 'generate_questions' ? 1_000 : 600,
+      temperature:
+        action === 'summarize'
+          ? 0.3
+          : action === 'generate_questions'
+          ? 0.4
+          : action === 'answer'
+          ? 0.2
+          : 0.5,
       top_p: 0.9,
       stream: false,
     };
-    
-    const response = await fetch(PERPLEXITY_API_URL, {
+
+    const response = await fetch(GROQ_API_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${PERPLEXITY_API_KEY}`,
+        Authorization: `Bearer ${GROQ_API_KEY}`,
       },
       body: JSON.stringify(requestBody),
     });
 
+    // ── 5. Handle API errors ────────────────
     if (!response.ok) {
       const errorText = await response.text();
-      console.error('❌ Perplexity API Error:', {
+      console.error('❌ Groq API Error:', {
         status: response.status,
         statusText: response.statusText,
         body: errorText,
-        apiKey: PERPLEXITY_API_KEY ? `${PERPLEXITY_API_KEY.substring(0, 10)}...` : 'NOT SET',
+        apiKeyPreview: GROQ_API_KEY
+          ? `${GROQ_API_KEY.substring(0, 10)}...`
+          : 'NOT SET',
       });
-      
+
       let errorMessage = 'Failed to process request';
       let userFriendlyMessage = '';
-      
+
       if (response.status === 401) {
-        errorMessage = 'Authentication failed. Invalid API key.';
-        userFriendlyMessage = 'The Perplexity API key is invalid or expired. Please verify your API key.';
-        console.error('🔑 API Key format:', PERPLEXITY_API_KEY ? `Starts with: ${PERPLEXITY_API_KEY.substring(0, 5)}...` : 'MISSING');
+        errorMessage = 'Authentication failed. Invalid Groq API key.';
+        userFriendlyMessage =
+          'The Groq API key is invalid or expired. Please verify your GROQ_API_KEY.';
       } else if (response.status === 400) {
-        errorMessage = `Bad request`;
+        errorMessage = 'Bad request';
         userFriendlyMessage = `Invalid request format. ${errorText}`;
-        console.error('📝 Request body that caused error:', JSON.stringify(requestBody, null, 2));
+        console.error(
+          '📝 Request body that caused error:',
+          JSON.stringify(requestBody, null, 2)
+        );
       } else if (response.status === 429) {
         errorMessage = 'Rate limit exceeded';
         userFriendlyMessage = 'Too many requests. Please wait a moment and try again.';
       } else if (response.status === 403) {
         errorMessage = 'Access forbidden';
-        userFriendlyMessage = 'API access denied. Check your subscription and permissions.';
+        userFriendlyMessage =
+          'API access denied. Check your subscription and permissions.';
       } else {
         userFriendlyMessage = `API error: ${response.statusText}`;
       }
 
       return NextResponse.json(
-        { 
-          error: errorMessage, 
+        {
+          error: errorMessage,
           message: userFriendlyMessage,
           details: errorText,
-          status: response.status 
+          status: response.status,
         },
         { status: response.status }
       );
     }
 
+    // ── 6. Parse and return response ────────
     const data = await response.json();
-    
-    console.log('✅ Response received from Perplexity AI');
-    
+
+    console.log('✅ Response received from Groq AI');
+
     if (!data.choices || data.choices.length === 0) {
       console.error('❌ Invalid response structure:', data);
       return NextResponse.json(
@@ -224,45 +269,53 @@ ${truncatedText}`,
       );
     }
 
-    const aiResponse = data.choices[0].message.content;
-    
-    console.log(`✅ ${action} completed successfully. Response length: ${aiResponse.length} chars`);
+    const aiResponse: string = data.choices[0].message.content;
+
+    console.log(
+      `✅ "${action}" completed successfully. Response length: ${aiResponse.length} chars`
+    );
 
     return NextResponse.json({
       success: true,
       response: aiResponse,
       usage: data.usage,
-      action: action,
+      action,
     });
-
   } catch (error: any) {
-    console.error('❌ AI Chat API error:', error);
+    console.error('❌ Groq AI Chat API error:', error);
     return NextResponse.json(
-      { 
+      {
         error: error.message || 'Internal server error',
         details: error.stack || 'No stack trace available',
-        type: error.name || 'UnknownError'
+        type: error.name || 'UnknownError',
       },
       { status: 500 }
     );
   }
 }
 
+// ──────────────────────────────────────────────
+// GET handler – health / configuration check
+// ──────────────────────────────────────────────
+
 /**
- * Test endpoint to verify API configuration
  * GET /api/ai/chat
+ * Returns current configuration status (no sensitive data exposed).
  */
 export async function GET() {
-  const hasApiKey = !!PERPLEXITY_API_KEY && PERPLEXITY_API_KEY.trim() !== '';
-  
+  const hasApiKey = !!GROQ_API_KEY && GROQ_API_KEY.trim() !== '';
+
   return NextResponse.json({
     status: hasApiKey ? 'ok' : 'error',
-    message: hasApiKey 
-      ? 'Perplexity AI Chat API is running and configured' 
-      : 'API key is not configured',
+    message: hasApiKey
+      ? 'Groq AI Chat API is running and configured'
+      : 'GROQ_API_KEY is not configured',
+    provider: 'Groq',
     model: MODEL,
     apiKeyConfigured: hasApiKey,
-    apiKeyPreview: hasApiKey ? `${PERPLEXITY_API_KEY.substring(0, 10)}...` : 'NOT SET',
+    apiKeyPreview: hasApiKey
+      ? `${GROQ_API_KEY.substring(0, 10)}...`
+      : 'NOT SET',
     timestamp: new Date().toISOString(),
   });
 }
